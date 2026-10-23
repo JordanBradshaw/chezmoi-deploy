@@ -1,0 +1,59 @@
+# Tools bundled by build.sh, downloaded with eget for the target system.
+#
+# Columns: name repo file assets
+#   repo    GitHub owner/name, or cross:NAME to build from source with
+#           cross/NAME.sh ARCH OUT (e.g. tmux with the Jetson Yocto SDK).
+#   file    binary to extract from the release asset (an eget --file glob);
+#           it is installed as "name".
+#   assets  "|"-separated alternatives tried in order; each alternative is a
+#           ","-separated list of eget --asset filters (^ excludes); "-"
+#           means no filters. Package and checksum files are always
+#           excluded. eget picks among what is left using --system, but a
+#           filter that leaves one asset wins even for the wrong CPU, so
+#           every download is checked with elf_arch and the next alternative
+#           tried. On armv7l each alternative is first tried with an extra
+#           "armv7" filter.
+#
+# Static musl builds come first so binaries run on older glibc (JetPack 4 is
+# Ubuntu 18.04). A tool with no build for an arch is skipped with a warning.
+fzf     junegunn/fzf          fzf     tar.gz
+eza     eza-community/eza     eza     musl,tar.gz|gnu,tar.gz,^no_libgit
+lsd     lsd-rs/lsd            lsd     musl|gnu
+bat     sharkdp/bat           bat     musl|gnu
+rg      BurntSushi/ripgrep    rg      musl|gnu
+fd      sharkdp/fd            fd      musl|gnu
+delta   dandavison/delta      delta   musl|gnu
+zoxide  ajeetdsouza/zoxide    zoxide  musl
+atuin   atuinsh/atuin         atuin   musl,^server|gnu,^server
+direnv  direnv/direnv         direnv  -
+btm     ClementTsang/bottom   btm     musl,tar.gz|gnu,tar.gz
+dust    bootandy/dust         dust    musl|gnu
+duf     muesli/duf            duf     tar.gz
+procs   dalance/procs         procs   zip
+lazydocker  jesseduffield/lazydocker  lazydocker     tar.gz|x86_64,tar.gz
+lazyjournal Lifailon/lazyjournal      lazyjournal    -
+bandwhich   imsnif/bandwhich          bandwhich      musl|gnu
+diskwatch   matthart1983/diskwatch    diskwatch*     static|-
+lsoff       yutat23/lsoff             lsoff          -
+systeroid   orhun/systeroid           systeroid      musl,^all-features|gnu,^all-features
+systeroid-tui orhun/systeroid         systeroid-tui  musl,^all-features|gnu,^all-features
+systemctl-tui rgwood/systemctl-tui      systemctl-tui  musl|gnu
+tspin         bensadeh/tailspin         tspin          musl|gnu
+rustnet       domcyrus/rustnet          rustnet        musl|gnu
+xfr           lance0/xfr                xfr            musl|gnu
+snitch        karol-broda/snitch        snitch         tar.gz
+trip          fujiapple852/trippy       trip           musl|gnu
+gping         orf/gping                 gping          musl|gnu|-
+tracexec      kxxt/tracexec             tracexec       static|-
+cyme          tuna-f1sh/cyme            cyme           musl|gnu
+usbtree       gnomeria/usbtree          usbtree        tar.gz
+viddy         sachaos/viddy             viddy          tar.gz
+lnav          tstack/lnav               lnav           musl
+zellij        zellij-org/zellij         zellij         musl,^no-web|musl
+ctop          bcicen/ctop               ctop*          -
+dive          wagoodman/dive            dive           tar.gz
+comchan       Vaishnav-Sabari-Girish/ComChan comchan   musl|gnu
+binsider      orhun/binsider            binsider       musl|gnu
+pueue         Nukesor/pueue             pueue*         pueue-
+pueued        Nukesor/pueue             pueued*        pueued
+tmux          cross:tmux                tmux           -
