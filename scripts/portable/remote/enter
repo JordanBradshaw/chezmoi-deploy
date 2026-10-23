@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# Start the bundled zsh. Everything it writes stays under the bundle root:
+# the app dir is replaced on update, state/ (history, zoxide and atuin data,
+# caches) is kept.
+#
+# Usage: enter [zsh args...]   (default: an interactive login shell)
+
+app=$(cd "$(dirname "$0")" && pwd)
+root=${app%/*}
+state=$root/state
+
+export ZSH_PORTABLE=$root
+export XDG_CONFIG_HOME=$app/home/.config
+export XDG_BIN_HOME=$app/bin
+export XDG_BIN_DIR=$XDG_BIN_HOME
+export XDG_DATA_HOME=$state/data
+export XDG_STATE_HOME=$state/state
+export XDG_CACHE_HOME=$state/cache
+export ZDOTDIR=$XDG_CONFIG_HOME/zsh
+export ANTIDOTE_HOME=$app/antidote
+export HISTFILE=$state/zsh_history
+export SHELL=$app/zsh/bin/zsh
+# antidote runs `zsh` by name, and many targets have no zsh of their own.
+export PATH=$app/zsh/bin:$PATH
+# Yocto images ship few terminfo entries; tmux, lnav and friends need the
+# bundled ones (tmux-256color, screen-256color...). Empty entry = system dirs.
+export TERMINFO_DIRS=$app/zsh/share/terminfo${TERMINFO_DIRS:+:$TERMINFO_DIRS}:
+# No network on most targets: don't let atuin look for updates.
+export ATUIN_UPDATE_CHECK=false
+# atuin 18 keeps some data in ~/.atuin unless told otherwise.
+export ATUIN_HOME=$state/atuin
+
+mkdir -p "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+
+if [ $# -eq 0 ]; then
+    set -- -il
+fi
+exec "$SHELL" "$@"
