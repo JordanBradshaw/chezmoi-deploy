@@ -20,8 +20,9 @@
 #   every value from ~/.config/secrets/env before it is packed.
 #
 #   The bundle is rebuilt only when tracked or untracked files under home/ or
-#   scripts/portable/ change. --force rebuilds anyway; --refresh also
-#   re-downloads zsh, tools and plugins.
+#   scripts/portable/ change, or the yupps-zsh plugin it ships does (this
+#   machine's ~/.config/zsh/plugins/yupps-zsh, or $ZSSH_YUPPS_DIR). --force
+#   rebuilds anyway; --refresh also re-downloads zsh, tools and plugins.
 #
 #   Caches live in ${XDG_CACHE_HOME:-~/.cache}/zsh-portable.
 
@@ -119,6 +120,42 @@ elf_arch() {
     esac
 }
 
+# git_externals TOML PATH...: print "path<TAB>url<TAB>clone args" for every
+# git-repo external in a rendered .chezmoiexternal.toml that lies in one of
+# PATH. chezmoi archive can't include these, so build.sh clones them itself.
+git_externals() {
+    local toml=$1
+    shift
+    python3 - "$toml" "$@" <<'EOF'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    externals = tomllib.load(f)
+roots = sys.argv[2:]
+for path, ext in externals.items():
+    if ext.get("type") != "git-repo":
+        continue
+    if not any(path == r or path.startswith(r + "/") for r in roots):
+        continue
+    args = " ".join(ext.get("clone", {}).get("args", []))
+    print(f"{path}\t{ext['url']}\t{args}")
+EOF
+}
+
+# yupps_dir: the yupps-zsh plugin to bundle: $ZSSH_YUPPS_DIR, else the
+# checkout this machine runs (cloned by zshrc.d/71-custom-plugin.zsh).
+yupps_dir() {
+    echo "${ZSSH_YUPPS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/zsh/plugins/yupps-zsh}"
+}
+
+# copy_yupps SRC DEST: copy the plugin without git metadata, tests and CI.
+copy_yupps() {
+    local src=$1 dest=$2
+    mkdir -p "$dest"
+    tar -C "$src" -cf - \
+        --exclude=./.git --exclude=./tests --exclude=./.github --exclude=./.gitignore --exclude=./.opencode . |
+        tar -C "$dest" -xf -
+}
+
 # filter_plugins: drop host-specific plugins from a .zsh_plugins.txt on stdin.
 filter_plugins() {
     grep -Ev -- "$DROP_PLUGINS_RE" || true
@@ -165,13 +202,22 @@ check_secrets() {
     return "$found"
 }
 
-# input_stamp REPO ARCH: hash of everything that affects the bundle.
+# input_stamp REPO ARCH [YUPPS_DIR]: hash of everything that affects the
+# bundle, including the yupps-zsh plugin it ships.
 input_stamp() {
-    local repo=$1 arch=$2
+    local repo=$1 arch=$2 dev=${3:-} f
+    local -a present=()
     {
         echo "$arch $ZSH_BIN_TAG"
-        (cd "$repo" && git ls-files -z -co --exclude-standard -- home scripts/portable \
-            | sort -z | xargs -0 -r sha256sum)
+        # Tracked files deleted in the working tree count by name only.
+        while IFS= read -r -d '' f; do
+            if [[ -f $repo/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
+        done < <(cd "$repo" && git ls-files -z -co --exclude-standard -- home scripts/portable | sort -zu)
+        (( ${#present[@]} == 0 )) || (cd "$repo" && sha256sum -- "${present[@]}")
+        if [[ -n $dev ]]; then
+            echo "yupps $dev"
+            (cd "$dev" && find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 -r sha256sum)
+        fi
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -282,23 +328,34 @@ fetch_tools() {
     done <"$SCRIPT_DIR/tools.tsv"
 }
 
-fetch_antidote() {
-    local dest=$1
-    local src="$CACHE/antidote"
-    if [[ ! -d $src/.git ]]; then
-        log "cloning antidote"
-        git clone --quiet --depth 1 https://github.com/mattmc3/antidote "$src"
-    elif [[ -n $REFRESH ]]; then
-        git -C "$src" pull --quiet --ff-only
-    fi
-    mkdir -p "$dest"
-    tar -C "$src" --exclude=.git -cf - . | tar -C "$dest" -xf -
+fetch_git_externals() {
+    local dest=$1 tmp=$2
+    local path url args key src
+    chezmoi --source="$REPO" --config="$tmp/chezmoi.toml" \
+        --persistent-state="$tmp/chezmoistate.db" --destination="$tmp/fake-home" \
+        execute-template <"$REPO/home/.chezmoiexternal.toml.tmpl" >"$tmp/externals.toml" \
+        2> >(grep -v 'config file template has changed' >&2) \
+        || die "could not render .chezmoiexternal.toml.tmpl"
+    while IFS=$'\t' read -r path url args; do
+        # Keyed by url and clone args, so a branch change gets a fresh clone.
+        key="$(printf '%s %s' "$url" "$args" | sha256sum | cut -c1-12)"
+        src="$CACHE/git/${path//\//_}-$key"
+        if [[ ! -d $src/.git ]]; then
+            log "cloning $url ($path)"
+            # shellcheck disable=SC2086 # args are separate git options
+            git clone --quiet $args "$url" "$src" >&2 || die "could not clone $url"
+        elif [[ -n $REFRESH ]]; then
+            git -C "$src" pull --quiet --ff-only >&2 || die "could not update $src"
+        fi
+        mkdir -p "$dest/$path"
+        tar -C "$src" --exclude=.git -cf - . | tar -C "$dest/$path" -xf -
+    done < <(git_externals "$tmp/externals.toml" "${EXPORT_PATHS[@]}")
 }
 
-# fetch_plugins PLUGINS_TXT DEST: clone every plugin into an antidote home
-# and copy it into DEST without .git, so the target never needs to clone.
+# fetch_plugins ANTIDOTE PLUGINS_TXT DEST: clone every plugin into an antidote
+# home and copy it into DEST without .git, so the target never needs to clone.
 fetch_plugins() {
-    local plugins=$1 dest=$2
+    local antidote=$1 plugins=$2 dest=$3
     local home="$CACHE/antidote-home"
     command -v zsh >/dev/null || die "zsh is needed to resolve plugins"
     log "resolving plugins"
@@ -307,7 +364,7 @@ fetch_plugins() {
         zstyle ":antidote:bundle" use-friendly-names yes
         [[ -z $3 ]] || antidote update >/dev/null
         antidote bundle <"$2" >/dev/null
-    ' _ "$CACHE/antidote" "$plugins" "$REFRESH" >&2 \
+    ' _ "$antidote" "$plugins" "$REFRESH" >&2 \
         || die "antidote could not fetch plugins"
     mkdir -p "$dest"
     tar -C "$home" --exclude=.git -cf - . | tar -C "$dest" -xf -
@@ -339,10 +396,21 @@ export_dotfiles() {
         2> >(grep -v 'config file template has changed' >&2) \
         || die "chezmoi archive of externals failed"
     tar -xmf "$tmp/externals.tar" -C "$dest"
+
+    # yupps-zsh: the checkout this machine runs, minus .git, so the bundle
+    # matches it and the offline target never clones.
+    [[ -f $YUPPS_DIR/yupps.plugin.zsh ]] ||
+        die "no yupps-zsh at $YUPPS_DIR (start zsh once to clone it, or set ZSSH_YUPPS_DIR)"
+    log "bundling yupps-zsh from $YUPPS_DIR"
+    copy_yupps "$YUPPS_DIR" "$dest/.config/zsh/plugins/yupps-zsh"
+    # As zshrc.d/71-custom-plugin.zsh links it, so the theme loads at once.
+    [[ -d $dest/.config/zsh/plugins/yupps-zsh/themes ]] &&
+        ln -sfn plugins/yupps-zsh/themes "$dest/.config/zsh/themes"
+    return 0
 }
 
 usage() {
-    sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
@@ -373,7 +441,8 @@ main() {
     local stamp_file="$out/zsh-portable-$arch.stamp"
     local version_file="$out/zsh-portable-$arch.version"
     local stamp
-    stamp="$(input_stamp "$REPO" "$arch")"
+    YUPPS_DIR="$(yupps_dir)"
+    stamp="$(input_stamp "$REPO" "$arch" "$YUPPS_DIR")"
     if [[ -z $force && -s $bundle && -s $version_file \
         && $(cat "$stamp_file" 2>/dev/null) == "$stamp" ]]; then
         log "up to date: $bundle"
@@ -390,8 +459,8 @@ main() {
     export_dotfiles "$app/home" "$tmp"
     local plugins="$app/home/.config/zsh/.zsh_plugins.txt"
     filter_plugins <"$plugins" >"$plugins.tmp" && mv "$plugins.tmp" "$plugins"
-    fetch_antidote "$app/home/.config/zsh/.antidote"
-    fetch_plugins "$plugins" "$app/antidote"
+    fetch_git_externals "$app/home" "$tmp"
+    fetch_plugins "$app/home/.config/zsh/.antidote" "$plugins" "$app/antidote"
     fetch_zsh "$arch" "$app/zsh"
     fetch_tools "$arch" "$app/bin"
     cp "$SCRIPT_DIR/remote/setup.sh" "$SCRIPT_DIR/remote/enter" "$app/"
