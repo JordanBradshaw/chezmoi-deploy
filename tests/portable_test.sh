@@ -106,6 +106,14 @@ rm -rf "$app"
 echo "$out"
 EOF
     chmod +x "$STUBS/build.sh"
+
+    # Local fonts, as fc-list : family prints them.
+    export FAKE_FONTS="FiraCode Nerd Font"
+    cat >"$STUBS/fc-list" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$FAKE_FONTS"
+EOF
+    chmod +x "$STUBS/fc-list"
 }
 
 run_zssh() {
@@ -425,6 +433,106 @@ test_setup_probes_tools_outside_home() {
 }
 
 # ---------------------------------------------------------------------------
+# git-repo externals
+# ---------------------------------------------------------------------------
+
+test_git_externals_lists_repos_under_exported_paths() {
+    cat >"$SANDBOX/ext.toml" <<'EOF'
+[".config/zsh/.antidote"]
+    type = "git-repo"
+    url = "https://github.com/mattmc3/antidote.git"
+    [".config/zsh/.antidote".clone]
+        args = ["--depth", "1"]
+
+[".config/zsh/plugins/jb"]
+    type = "git-repo"
+    url = "https://github.com/jb/zsh-config.git"
+    [".config/zsh/plugins/jb".clone]
+        args = ["--branch", "zsh-plugin", "--single-branch", "--depth", "1"]
+
+[".config/tmux/plugins/x"]
+    type = "archive"
+    url = "https://example.com/x.tar.gz"
+
+[".local/share/icons/candy-icons"]
+    type = "git-repo"
+    url = "https://github.com/EliverLara/candy-icons.git"
+EOF
+    OUTPUT="$(git_externals "$SANDBOX/ext.toml" .zshenv .config/zsh .config/tmux | cat -A)"
+    assert_eq "$OUTPUT" ".config/zsh/.antidote^Ihttps://github.com/mattmc3/antidote.git^I--depth 1\$
+.config/zsh/plugins/jb^Ihttps://github.com/jb/zsh-config.git^I--branch zsh-plugin --single-branch --depth 1\$"
+}
+
+test_git_externals_matches_whole_path_components() {
+    printf '[".config/zshrc-extra"]\n    type = "git-repo"\n    url = "u"\n' >"$SANDBOX/ext.toml"
+    assert_eq "$(git_externals "$SANDBOX/ext.toml" .config/zsh)" ""
+}
+
+# ---------------------------------------------------------------------------
+# Rebuild stamp
+# ---------------------------------------------------------------------------
+
+# A tracked file deleted in the working tree (not yet committed) must not
+# break the stamp, and must change it.
+test_input_stamp_handles_deleted_tracked_files() {
+    local repo="$SANDBOX/repo" before after
+    mkdir -p "$repo/home" "$repo/scripts/portable"
+    git -C "$repo" init -q
+    echo a >"$repo/home/a"
+    echo b >"$repo/home/b"
+    git -C "$repo" add . && git -C "$repo" -c user.email=t@t -c user.name=t commit -qm init
+    before="$(input_stamp "$repo" x86_64 2>"$SANDBOX/err")"
+    rm "$repo/home/b"
+    after="$(input_stamp "$repo" x86_64 2>"$SANDBOX/err")"
+    assert_eq "$(cat "$SANDBOX/err")" ""
+    [[ -n $after && $after != "$before" ]] || fail "stamp unchanged after delete"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# yupps-zsh: the bundle ships the plugin this machine runs
+# ---------------------------------------------------------------------------
+
+test_yupps_dir_defaults_to_installed_plugin() {
+    assert_eq "$(ZSSH_YUPPS_DIR= XDG_CONFIG_HOME=/c yupps_dir)" "/c/zsh/plugins/yupps-zsh"
+    assert_eq "$(ZSSH_YUPPS_DIR= XDG_CONFIG_HOME= yupps_dir)" "$HOME/.config/zsh/plugins/yupps-zsh"
+}
+
+test_yupps_dir_env_override() {
+    assert_eq "$(ZSSH_YUPPS_DIR=/x/y yupps_dir)" "/x/y"
+}
+
+test_input_stamp_follows_yupps_dir() {
+    local repo="$SANDBOX/repo" dev="$SANDBOX/dev" a b
+    mkdir -p "$repo/home" "$dev/conf.d"
+    git -C "$repo" init -q
+    echo a >"$repo/home/a"
+    echo 1 >"$dev/conf.d/x.zsh"
+    a="$(input_stamp "$repo" x86_64 "$dev")"
+    echo 2 >"$dev/conf.d/x.zsh"
+    b="$(input_stamp "$repo" x86_64 "$dev")"
+    [[ $a != "$b" ]] || fail "stamp ignores the yupps-zsh dir"
+    [[ $(input_stamp "$repo" x86_64) != "$b" ]] || fail "stamp same without yupps-zsh dir"
+    return 0
+}
+
+test_copy_yupps_skips_git_and_tests() {
+    local dev="$SANDBOX/dev"
+    mkdir -p "$dev/conf.d" "$dev/tests" "$dev/.git" "$dev/.github"
+    echo x >"$dev/yupps.plugin.zsh"
+    echo y >"$dev/conf.d/a.zsh"
+    echo t >"$dev/tests/t.zsh"
+    copy_yupps "$dev" "$SANDBOX/out/plugins/yupps-zsh"
+    OUTPUT="$(cd "$SANDBOX/out" && find . | sort)"
+    assert_eq "$OUTPUT" ".
+./plugins
+./plugins/yupps-zsh
+./plugins/yupps-zsh/conf.d
+./plugins/yupps-zsh/conf.d/a.zsh
+./plugins/yupps-zsh/yupps.plugin.zsh"
+}
+
+# ---------------------------------------------------------------------------
 # Plugin list
 # ---------------------------------------------------------------------------
 
@@ -552,6 +660,23 @@ test_zssh_custom_remote_dir() {
     assert_eq "$(cat "$SANDBOX/elsewhere/app/VERSION" 2>/dev/null)" v1
 }
 
+# The local terminal draws the icons; the remote side can't supply a font.
+test_zssh_warns_without_local_nerd_font() {
+    stub_remote
+    FAKE_FONTS=$'Fira Code\nDejaVu Sans Mono' run_zssh jetson
+    assert_status 0
+    assert_output_matches "no Nerd Font"
+    assert_file_contains "$REMOTE_HOME/remote.log" "^enter v1$"
+}
+
+test_zssh_quiet_with_local_nerd_font() {
+    stub_remote
+    FAKE_FONTS=$'Fira Code\nFiraCode Nerd Font Mono' run_zssh jetson
+    assert_status 0
+    grep -q "Nerd Font" <<<"$OUTPUT" && fail "warned despite a Nerd Font"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # End to end (opt-in)
 # ---------------------------------------------------------------------------
@@ -577,6 +702,9 @@ rm -rf /etc/terminfo /lib/terminfo /usr/share/terminfo /usr/lib/terminfo
 # commands that drive the camera.
 echo "touch \$HOME/ALIASES_SOURCED" >$HOME/.aliases
 echo "touch \$HOME/ZSHENV_LOCAL_SOURCED" >$HOME/.zshenv.local
+mkdir -p $HOME/.config/zsh/zshenv.d $HOME/.config/zsh/zshrc.d
+echo "touch \$HOME/HOST_ZSHENV_D_SOURCED" >$HOME/.config/zsh/zshenv.d/50-host.zsh
+echo "touch \$HOME/HOST_ZSHRC_D_SOURCED" >$HOME/.config/zsh/zshrc.d/50-host.zsh
 d=$HOME/.zsh-portable
 mkdir -p $d/app.new $d/state
 tar -xzf /bundle.tar.gz -C $d/app.new
@@ -611,20 +739,23 @@ $d/app/enter -ic "
   [[ -n \$terminfo[cuu1] && -n \$terminfo[cub1] ]]
   whence -w git_prompt_info
   alias ll >/dev/null || whence -w ll
-  [[ \$PROMPT == *┌──* ]]
+  # The theme loads in a use-omz first-prompt hook; -c never draws a prompt.
+  for f in \$precmd_functions; do \$f || true; done
+  [[ \$PROMPT == *debian_chroot* ]] || { print \"yupps theme not loaded\"; exit 1; }
+  [[ -z \${aliases[ls]} ]] || { print \"ls aliased: \${aliases[ls]}\"; exit 1; }
   [[ \$HISTFILE == \$HOME/.zsh-portable/state/* ]]
   (( \${+commands[fzf]} && \${+commands[eza]} && \${+commands[zoxide]} ))
   [[ -z \$(ls \$HOME/.config/secrets 2>/dev/null) ]]
   print PORTABLE_OK
 "
 # Nothing may be written outside ~/.zsh-portable.
-for f in ALIASES_SOURCED ZSHENV_LOCAL_SOURCED; do
+for f in ALIASES_SOURCED ZSHENV_LOCAL_SOURCED HOST_ZSHENV_D_SOURCED HOST_ZSHRC_D_SOURCED; do
     [ ! -e $HOME/$f ] || { echo "host dotfile sourced: $f"; exit 1; }
 done
 # Unpacked as root, nothing may stay owned by the build user'"'"'s uid.
 foreign=$(find $d/app ! -user 0 | head -3)
 [ "$(id -u)" != 0 ] || [ -z "$foreign" ] || { echo "not owned by root: $foreign"; exit 1; }
-extra=$(cd $HOME && ls -A | grep -vxE ".zsh-portable|.bashrc|.profile|.aliases|.zshenv.local|setup.err" || true)
+extra=$(cd $HOME && ls -A | grep -vxE ".zsh-portable|.bashrc|.profile|.aliases|.zshenv.local|.config|setup.err" || true)
 [ -z "$extra" ] || { echo "leaked into HOME: $extra"; exit 1; }
 echo HERMETIC_OK
 '
