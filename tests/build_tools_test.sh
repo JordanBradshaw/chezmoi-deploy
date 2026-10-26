@@ -10,8 +10,9 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export CHEZMOI_SRC="$REPO_DIR"
+export CHEZMOI_SRC="${CHEZMOI_SRC:-$REPO_DIR}"
 BUILD_TOOLS="$REPO_DIR/portable/build-tools.sh"
+SHIM="$REPO_DIR/portable/lib.sh"
 BASH_BIN="$(command -v bash)"
 PASS=0
 FAIL=0
@@ -99,6 +100,41 @@ test_lib_sh_provides_shared_functions() {
             declare -F \$f >/dev/null || echo missing:\$f
         done" 2>&1)"
     assert_eq "$OUTPUT" ""
+}
+
+# shim CODE: run CODE after sourcing portable/lib.sh.
+shim() {
+    OUTPUT="$("$BASH_BIN" -c "source '$SHIM'; $1" 2>&1)"
+    STATUS=$?
+}
+
+test_resolve_chezmoi_src_order() {
+    local a="$SANDBOX/a" b="$SANDBOX/b" c="$SANDBOX/c" real_src="$CHEZMOI_SRC"
+    unset CHEZMOI_SRC
+    mkdir -p "$SANDBOX/bin"
+    for d in "$a" "$b" "$c"; do mkdir -p "$d/apps"; cp "$real_src/apps/apps.tsv" "$real_src/apps/lib.sh" "$d/apps/"; done
+    git -C "$c" init -q
+    printf '#!/bin/sh\necho %s/apps\n' "$c" >"$SANDBOX/bin/chezmoi"
+    chmod +x "$SANDBOX/bin/chezmoi"
+    export PATH="$SANDBOX/bin:$PATH"
+    shim "resolve_chezmoi_src '$a'; echo \$CHEZMOI_SRC" # no env set: explicit wins
+    assert_eq "$OUTPUT" "$a"
+    CHEZMOI_SRC="$b" shim "resolve_chezmoi_src '$a'; echo \$CHEZMOI_SRC"
+    assert_eq "$OUTPUT" "$a"
+    CHEZMOI_SRC="$b" shim "resolve_chezmoi_src; echo \$CHEZMOI_SRC"
+    assert_eq "$OUTPUT" "$b"
+    shim "resolve_chezmoi_src; echo \$CHEZMOI_SRC"
+    assert_eq "$OUTPUT" "$c"
+    shim "resolve_chezmoi_src '$a'; type -t apps_load"
+    assert_eq "$OUTPUT" "function"
+    export CHEZMOI_SRC="$real_src"
+}
+
+test_resolve_chezmoi_src_rejects_tree_without_apps() {
+    mkdir -p "$SANDBOX/old"
+    shim "resolve_chezmoi_src '$SANDBOX/old'"
+    assert_eq "$STATUS" 1
+    assert_eq "$OUTPUT" "no apps/apps.tsv in $SANDBOX/old (set CHEZMOI_SRC or --chezmoi to a chezmoi checkout)"
 }
 
 # ---------------------------------------------------------------------------
@@ -507,7 +543,7 @@ test_chezmoi_flag_sets_locks_dir() {
     mkdir -p "$cz/apps/locks"
     manifest_rows "$RG_ONLY" >"$cz/apps/apps.tsv"
     printf "$RG_LOCK" >"$cz/apps/locks/x86_64-v3.lock"
-    cp "$REPO_DIR/apps/lib.sh" "$cz/apps/lib.sh"
+    cp "$CHEZMOI_SRC/apps/lib.sh" "$cz/apps/lib.sh"
     crate_fixture ripgrep 15.2.0
     run_main --chezmoi "$cz" --locked
     assert_eq "$STATUS" 0
@@ -520,7 +556,7 @@ bad_chezmoi_default() {
     mkdir -p "$SANDBOX/badbin" "$SANDBOX/bad" "$SANDBOX/cz/apps"
     printf '#!/usr/bin/env bash\necho "%s"\n' "$SANDBOX/bad" >"$SANDBOX/badbin/chezmoi"
     chmod +x "$SANDBOX/badbin/chezmoi"
-    cp "$REPO_DIR/apps/apps.tsv" "$REPO_DIR/apps/lib.sh" "$SANDBOX/cz/apps/"
+    cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
 }
 
 test_chezmoi_flag_beats_bad_default() {
@@ -815,7 +851,7 @@ test_builder_run_mounts_repo_and_cache() {
     docker_stub
     local cache="$SANDBOX/xdg/zsh-portable"
     mkdir -p "$SANDBOX/cz/apps"
-    cp "$REPO_DIR/apps/apps.tsv" "$REPO_DIR/apps/lib.sh" "$SANDBOX/cz/apps/"
+    cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
     CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" run echo hi >/dev/null 2>&1
     local log
     log="$(tr '\n' ' ' <"$STUB_LOG")"
