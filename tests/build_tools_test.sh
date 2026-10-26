@@ -521,6 +521,33 @@ test_chezmoi_flag_sets_locks_dir() {
     return 0
 }
 
+# Run directly, a bad default chezmoi tree must not stop --chezmoi or --help.
+bad_chezmoi_default() {
+    mkdir -p "$SANDBOX/badbin" "$SANDBOX/bad" "$SANDBOX/cz/apps"
+    printf '#!/usr/bin/env bash\necho "%s"\n' "$SANDBOX/bad" >"$SANDBOX/badbin/chezmoi"
+    chmod +x "$SANDBOX/badbin/chezmoi"
+    cp "$REPO_DIR/apps/apps.tsv" "$REPO_DIR/apps/lib.sh" "$SANDBOX/cz/apps/"
+}
+
+test_chezmoi_flag_beats_bad_default() {
+    bad_chezmoi_default
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/badbin:$PATH" "$BASH_BIN" "$BUILD_TOOLS" \
+        --chezmoi "$SANDBOX/cz" --profile pdp11 2>&1)"
+    STATUS=$?
+    assert_eq "$STATUS" 2
+    [[ $OUTPUT == *"unknown profile pdp11"* ]] || fail "did not get past resolution: $OUTPUT"
+    return 0
+}
+
+test_help_needs_no_chezmoi_tree() {
+    bad_chezmoi_default
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/badbin:$PATH" "$BASH_BIN" "$BUILD_TOOLS" --help 2>&1)"
+    STATUS=$?
+    assert_eq "$STATUS" 0
+    [[ $OUTPUT == *Usage* ]] || fail "no usage: $OUTPUT"
+    return 0
+}
+
 test_non_bundle_rows_ignored() {
     main_stubs "$RG_ONLY" "$RG_LOCK"
     printf 'zz  -  n  -  -  -  -  x/zz  zz  -  release\n' >>"$APPS_FILE"

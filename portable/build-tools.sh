@@ -15,8 +15,8 @@
 #     cross:NAME                cross/NAME.sh (needs the Yocto SDK)
 #     release                   the upstream release, with eget
 #
-#   Versions come from the chezmoi tree's apps/locks/NAME.lock. --locked (the default) builds exactly
-#   those; --resolve looks up the latest version of every tool and rewrites
+#   Versions come from the chezmoi tree's apps/locks/NAME.lock. --locked
+#   (the default) builds exactly those; --resolve looks up the latest version of every tool and rewrites
 #   the lock. A tool missing from the lock is looked up either way.
 #
 #   Builds are cached per tool, version and recipe, and checked (ELF arch;
@@ -37,7 +37,6 @@ CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 
 # shellcheck source=lib.sh
 source "$PORTABLE_DIR/lib.sh"
-resolve_chezmoi_src || return 1 2>/dev/null || exit 1
 
 # set_chezmoi_defaults: APPS_FILE and LOCKS_DIR from CHEZMOI_SRC unless the
 # environment set them.
@@ -45,7 +44,12 @@ set_chezmoi_defaults() {
     APPS_FILE=${USER_APPS_FILE:-$CHEZMOI_SRC/apps/apps.tsv}
     LOCKS_DIR=${USER_LOCKS_DIR:-$CHEZMOI_SRC/apps/locks}
 }
-set_chezmoi_defaults
+# Sourced (tests): resolve now. Run directly: main resolves after the flags,
+# so --chezmoi beats a bad default and --help needs no tree.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    resolve_chezmoi_src || return 1
+    set_chezmoi_defaults
+fi
 
 # Per tool, from the manifest (in file order: NAMES) and the lock (LOCK).
 declare -a NAMES=()
@@ -441,10 +445,8 @@ main() {
         esac
     done
     [[ -n $profile ]] || { usage >&2; exit 2; }
-    if [[ -n $chezmoi ]]; then
-        resolve_chezmoi_src "$chezmoi" || exit 2
-        set_chezmoi_defaults
-    fi
+    resolve_chezmoi_src "$chezmoi" || exit 2
+    set_chezmoi_defaults
     load_profile "$profile" || exit 2
     ONLY=$only
     out=${out:-$CACHE_ROOT/tools-out/$PROFILE_NAME}
