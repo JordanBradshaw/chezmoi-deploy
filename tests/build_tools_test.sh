@@ -12,7 +12,6 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CHEZMOI_SRC="$REPO_DIR"
 BUILD_TOOLS="$REPO_DIR/portable/build-tools.sh"
-TOOLS_TSV="$REPO_DIR/portable/tools.tsv"
 BASH_BIN="$(command -v bash)"
 PASS=0
 FAIL=0
@@ -93,11 +92,6 @@ test_usage_without_profile_exits_2() {
 # ---------------------------------------------------------------------------
 # manifest sources
 # ---------------------------------------------------------------------------
-
-# tsv_rows: tools.tsv without comments and blank lines.
-tsv_rows() {
-    grep -vE '^[[:space:]]*(#|$)' "$TOOLS_TSV"
-}
 
 test_lib_sh_provides_shared_functions() {
     OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'; resolve_chezmoi_src
@@ -732,7 +726,7 @@ test_only_limits_tools() {
     return 0
 }
 
-# main runs under set -e: a last tools.tsv row outside --only must not end it.
+# main runs under set -e: a last manifest row outside --only must not end it.
 test_only_without_the_last_row() {
     main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
     crate_fixture ripgrep 15.2.0
