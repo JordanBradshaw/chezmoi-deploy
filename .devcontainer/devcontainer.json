@@ -1,7 +1,7 @@
 {
   "name": "chezmoi-deploy builder",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-  "features": {
-    "../features/src/zsh-builder": {}
+  "build": {
+    "dockerfile": "../features/builder/x86_64.Dockerfile",
+    "context": ".."
   }
 }
