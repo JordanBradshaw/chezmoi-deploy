@@ -186,14 +186,29 @@ the same entry points and are out of scope here.
 
 ## 6. Migration (approach A)
 
-### Step 0: clean start
+### Local layout
 
-The `rolling-bundles` worktree has uncommitted changes
-(`.devcontainer/devcontainer.json`, deleted `remap_mozilla.sh`, untracked
-`scripts/portable/locks/qos-orin.lock`). The owner commits or discards them
-before work starts. `~/repos/config-chezmoi` holds an uncommitted copy of
-an older tree for `JordanBradshaw/chezmoi`; diff it against
-`rolling-bundles` and fold anything newer in before it is replaced.
+| Checkout | Repo | Notes |
+|---|---|---|
+| `~/repos/chezmoi` | `JordanBradshaw/chezmoi` | exists, empty; becomes chezmoi's `sourceDir` |
+| `~/repos/chezmoi-deploy` | `JordanBradshaw/chezmoi-deploy` | exists, holds only `.opencode/` (kept, ignored) |
+| `~/repos/zsh-config` (+ `-rolling` worktree) | `JordanBradshaw/zsh-config` | source of the split; archived after |
+| `~/repos/config-chezmoi` | none (uncommitted) | older attempt; deleted after step 0 |
+
+### Step 0: clean start (done 2026-10-26, except the last two items)
+
+- `rolling-bundles` worktree: uncommitted changes discarded by the owner.
+- `scripts/portable/locks/qos-orin.lock` was untracked and is gone from the
+  worktree; the copy in `~/repos/config-chezmoi/scripts/portable/locks/`
+  becomes `apps/locks/qos-orin.lock` in step 1.1.
+- Diff `~/repos/config-chezmoi` against `rolling-bundles`; fold anything
+  newer into `split-seam`.
+- The live chezmoi source is `~/repos/zsh-config` on branch `config`
+  (`sourceDir` in `~/.config/chezmoi/chezmoi.toml`, git `autoCommit` on).
+  `config` is an ancestor of `rolling-bundles`; any commits it gains before
+  the switch-over (step 3) are merged into `split-seam` first. Its
+  untracked `.devcontainer/` is left alone.
+- `git-filter-repo` is not installed: `pipx install git-filter-repo`.
 
 ### Step 1: build the seam in zsh-config
 
@@ -227,23 +242,30 @@ From `split-seam`, two fresh clones, `git filter-repo`:
   `home/`, `apps/`, `scripts/install-apps.sh`, `scripts/kde/`,
   `scripts/merge-zsh-history.py`, `other/`, `install.sh`, `eget.sh`,
   `tests/` except the wrapper's files, and
-  `docs/superpowers/specs/2026-10-24-yupps-zsh-split-design.md`. Push to
-  `JordanBradshaw/chezmoi` `main`.
+  `docs/superpowers/specs/2026-10-24-yupps-zsh-split-design.md`. Result
+  lives at `~/repos/chezmoi`; push to `JordanBradshaw/chezmoi` `main`
+  (the remote has no commits; this replaces nothing).
 - **chezmoi-deploy**: keep `scripts/portable/` (renamed to `portable/`),
   `features/`, `tests/build_tools_test.sh`, `tests/portable_test.sh`,
   `tests/fixtures/chezmoi/`, and the portable/rolling specs, plans and
   this spec. Fix paths for the rename and update `documentationURL`s. Push
-  to `JordanBradshaw/chezmoi-deploy` `main`; check out at
-  `~/repos/chezmoi-deploy`, keeping its existing `.opencode/`.
+  to `JordanBradshaw/chezmoi-deploy` `main` (the GitHub repo does not exist
+  yet; the owner creates it, empty and public). The result goes into
+  `~/repos/chezmoi-deploy` with `git init` + fetch from the filtered clone
+  (the dir is not empty), keeping `.opencode/`, which is added to
+  `.gitignore`.
 - Add a `.devcontainer/` to the wrapper using the `zsh-builder` feature.
 - Run both suites in their new repos, and the wrapper's suite against a
   fresh chezmoi clone.
 
 ### Step 3: switch over
 
-- On each machine, `chezmoi init --apply JordanBradshaw/chezmoi`. The
-  source dir changes and the target files stay the same. Check with
-  `chezmoi diff` before applying.
+- This machine: set `sourceDir = "/home/jbradshaw/repos/chezmoi"` in
+  `~/.config/chezmoi/chezmoi.toml`, then `chezmoi diff` (expect no target
+  changes beyond the thin `zssh` and the desktop-only chezmoi-deploy
+  external) before `chezmoi apply`. The target files stay the same.
+- Other machines: `chezmoi init --apply JordanBradshaw/chezmoi`, after
+  checking `chezmoi diff`.
 - `zsh-config`: README pointing to both repos; archive the repo once no
   machine uses it.
 
