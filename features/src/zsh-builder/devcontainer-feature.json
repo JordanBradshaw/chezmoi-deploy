@@ -1,0 +1,24 @@
+{
+  "id": "zsh-builder",
+  "version": "0.1.0",
+  "name": "zsh-portable builder",
+  "description": "Toolchains to cross-build the zssh bundle's tools per target profile: rustup with targets, zig and cargo-zigbuild, Go, eget, binutils.",
+  "documentationURL": "https://github.com/JordanBradshaw/zsh-config/tree/config/features/src/zsh-builder",
+  "options": {
+    "rustTargets": {
+      "type": "string",
+      "default": "x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu",
+      "description": "Comma-separated rustup targets to install."
+    },
+    "goVersion": {
+      "type": "string",
+      "default": "latest",
+      "description": "Go version (e.g. 1.24.1), or latest."
+    }
+  },
+  "containerEnv": {
+    "CARGO_HOME": "/usr/local/cargo",
+    "RUSTUP_HOME": "/usr/local/rustup",
+    "PATH": "/usr/local/cargo/bin:/usr/local/go/bin:/usr/local/zig:${PATH}"
+  }
+}

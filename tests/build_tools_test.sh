@@ -341,7 +341,7 @@ recipe_stubs() {
 #!/usr/bin/env bash
 eval "$MAKE_ELF"
 echo "cargo $* [in ${PWD##*/}]" >>"$STUB_LOG"
-echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" >>"$STUB_LOG"
+echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS STRIP=${CARGO_PROFILE_RELEASE_STRIP:-}" >>"$STUB_LOG"
 [[ -n ${STUB_CARGO_FAIL:-} ]] && exit 101
 target="" bin=""
 while (( $# )); do
@@ -393,7 +393,7 @@ test_crate_build_uses_zigbuild_target_and_cpu() {
     assert_eq "$STATUS" 0
     grep -qx "cargo zigbuild --release --locked --target x86_64-unknown-linux-musl --bin rg \[in ripgrep-15.2.0\]" "$STUB_LOG" ||
         fail "cargo call: $(cat "$STUB_LOG")"
-    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=x86-64-v3 LTO=fat CGU=1" "$STUB_LOG" || fail "cargo env: $(cat "$STUB_LOG")"
+    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=x86-64-v3 LTO=fat CGU=1 STRIP=symbols" "$STUB_LOG" || fail "cargo env: $(cat "$STUB_LOG")"
     [[ -x $SANDBOX/out/rg ]] || fail "no binary"
     return 0
 }
@@ -586,6 +586,14 @@ test_cache_hit_skips_build() {
     return 0
 }
 
+# build-tools.sh's own settings (LTO, strip, Go flags) are part of the cache
+# key, so changing them rebuilds instead of reusing old binaries.
+test_build_settings_in_recipe_hash() {
+    main_stubs "$RG_ONLY"
+    btp 'load_profile x86_64-v3; load_tools; a=$(recipe_hash rg); BUILD_SETTINGS+=" changed"; b=$(recipe_hash rg); [[ $a != "$b" ]] && echo differs'
+    assert_eq "$OUTPUT" "differs"
+}
+
 test_recipe_change_rebuilds() {
     main_stubs "$RG_ONLY" "$RG_LOCK"
     crate_fixture ripgrep 15.2.0
@@ -688,6 +696,16 @@ test_only_limits_tools() {
     return 0
 }
 
+# main runs under set -e: a last tools.tsv row outside --only must not end it.
+test_only_without_the_last_row() {
+    main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
+    crate_fixture ripgrep 15.2.0
+    run_main --only rg
+    assert_eq "$STATUS" 0
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "no rg: $OUTPUT"
+    return 0
+}
+
 # --resolve keeps the old lock entry for a tool that fails at the new version.
 test_resolve_keeps_old_entry_when_new_build_fails() {
     main_stubs "$RG_ONLY" "$RG_LOCK"
@@ -714,6 +732,108 @@ test_locked_never_writes_lock() {
     fixture https://proxy.golang.org/github.com/junegunn/fzf/@latest '{"Version":"v0.66.0"}'
     run_main --locked
     assert_eq "$(cat "$LOCKS_DIR/x86_64-v3.lock")" "$(printf "$RG_LOCK")"
+}
+
+# ---------------------------------------------------------------------------
+# Builder image and runner
+# ---------------------------------------------------------------------------
+
+FEATURE_DIR="$REPO_DIR/features/src/zsh-builder"
+BUILDER="$REPO_DIR/scripts/portable/builder.sh"
+
+test_feature_json_valid() {
+    OUTPUT="$(python3 - "$FEATURE_DIR/devcontainer-feature.json" <<'EOF'
+import json, sys
+f = json.load(open(sys.argv[1]))
+print(f["id"], f["version"], f["options"]["rustTargets"]["default"], f["options"]["goVersion"]["default"])
+EOF
+)"
+    assert_eq "$OUTPUT" "zsh-builder 0.1.0 x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu latest"
+}
+
+# The Dockerfile route doesn't apply containerEnv, so it sets the same ENV.
+test_dockerfile_env_matches_feature() {
+    local key value
+    while IFS=$'\t' read -r key value; do
+        grep -qxF "ENV $key=\"$value\"" "$REPO_DIR/features/builder/x86_64.Dockerfile" ||
+            fail "Dockerfile lacks ENV $key=\"$value\""
+    done < <(python3 -c 'import json,sys; [print(k+"\t"+v) for k,v in json.load(open(sys.argv[1]))["containerEnv"].items()]' \
+        "$FEATURE_DIR/devcontainer-feature.json")
+    return 0
+}
+
+test_feature_install_script_syntax() {
+    bash -n "$FEATURE_DIR/install.sh" || fail "install.sh syntax"
+    [[ -x $FEATURE_DIR/install.sh ]] || fail "install.sh not executable"
+    return 0
+}
+
+# docker_stub: docker that logs one argument per line.
+docker_stub() {
+    stubs_setup
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" docker "$@" >>"$STUB_LOG"\n' >"$STUBS/docker"
+    chmod +x "$STUBS/docker"
+}
+
+test_builder_image_builds_dockerfile() {
+    docker_stub
+    PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" image >/dev/null 2>&1
+    assert_eq "$(tr '\n' ' ' <"$STUB_LOG")" "docker build -f $REPO_DIR/features/builder/x86_64.Dockerfile -t zsh-builder:local $REPO_DIR "
+}
+
+test_builder_run_mounts_repo_and_cache() {
+    docker_stub
+    local cache="$SANDBOX/xdg/zsh-portable"
+    XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" run echo hi >/dev/null 2>&1
+    local log
+    log="$(tr '\n' ' ' <"$STUB_LOG")"
+    [[ -d $cache ]] || fail "cache dir not created"
+    local want
+    for want in "docker run --rm" "--user $(id -u):$(id -g)" "-v $REPO_DIR:/src" "-w /src" \
+        "-v $cache:$cache" "-e ZSH_PORTABLE_CACHE=$cache" "-e XDG_CACHE_HOME=$cache/xdg-cache" "-e HOME=$cache/home" \
+        "-e CARGO_HOME=$cache/cargo-home" "-e ZIG_GLOBAL_CACHE_DIR=$cache/zig" \
+        "zsh-builder:local echo hi"; do
+        [[ $log == *"$want "* ]] || fail "missing '$want' in: $log"
+    done
+    return 0
+}
+
+# Inside the builder XDG_CACHE_HOME is a writable dir in the mounted cache
+# (cargo-zigbuild, go and friends write there); ZSH_PORTABLE_CACHE keeps
+# build-tools.sh on the host's cache path.
+test_cache_root_override() {
+    OUTPUT="$(XDG_CACHE_HOME=/x ZSH_PORTABLE_CACHE=/y/zp "$BASH_BIN" -c "source '$BUILD_TOOLS'; echo \$CACHE_ROOT")"
+    assert_eq "$OUTPUT" "/y/zp"
+    OUTPUT="$(XDG_CACHE_HOME=/x "$BASH_BIN" -c "unset ZSH_PORTABLE_CACHE; source '$BUILD_TOOLS'; echo \$CACHE_ROOT")"
+    assert_eq "$OUTPUT" "/x/zsh-portable"
+}
+
+test_builder_usage() {
+    OUTPUT="$("$BASH_BIN" "$BUILDER" 2>&1)"
+    STATUS=$?
+    assert_eq "$STATUS" 2
+    [[ $OUTPUT == *Usage* ]] || fail "no usage: $OUTPUT"
+    return 0
+}
+
+# BUILDER_E2E=1: the real image, and a real x86_64-v3 build of rg and fzf.
+test_e2e_x86_64_v3_builds_rg_and_fzf() {
+    [[ -n ${BUILDER_E2E:-} ]] || return 0
+    "$BASH_BIN" "$BUILDER" image >"$SANDBOX/image.log" 2>&1 || { fail "image build: $(tail -5 "$SANDBOX/image.log")"; return; }
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable" out
+    out="$cache/e2e-out"
+    rm -rf "$out" "$cache/e2e-locks"
+    "$BASH_BIN" "$BUILDER" run env LOCKS_DIR="$cache/e2e-locks" \
+        scripts/portable/build-tools.sh --profile x86_64-v3 --resolve --only rg,fzf --out "$out" \
+        >"$SANDBOX/build.log" 2>&1 || { fail "build: $(tail -20 "$SANDBOX/build.log")"; return; }
+    local t
+    for t in rg fzf; do
+        [[ $("$BASH_BIN" -c "source '$REPO_DIR/scripts/portable/lib.sh'; elf_arch '$out/bin/$t'") == x86_64 ]] || fail "$t: not x86_64"
+        readelf -lW "$out/bin/$t" | grep -q INTERP && fail "$t: not static"
+        "$out/bin/$t" --version >/dev/null 2>&1 || fail "$t: doesn't run"
+        grep -qP "^$t\t.*\t(built|cached)$" "$out/tools.lock" || fail "$t: tools.lock: $(cat "$out/tools.lock")"
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
