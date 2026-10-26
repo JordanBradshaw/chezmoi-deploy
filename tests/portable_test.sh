@@ -12,7 +12,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export CHEZMOI_SRC="$REPO_DIR"
+export CHEZMOI_SRC="${CHEZMOI_SRC:-$REPO_DIR}"
 BUILD="$REPO_DIR/portable/build.sh"
 
 PASS=0
@@ -412,7 +412,7 @@ mkrepos() {
     echo b >"$CHEZ/home/b"
     echo m >"$CHEZ/apps/apps.tsv"
     echo s >"$CHEZ/scripts/s"
-    cp "$REPO_DIR/apps/lib.sh" "$CHEZ/apps/lib.sh"
+    cp "$CHEZMOI_SRC/apps/lib.sh" "$CHEZ/apps/lib.sh"
     echo p >"$DEP/portable/p"
     local r
     for r in "$CHEZ" "$DEP"; do
@@ -506,7 +506,7 @@ test_direct_run_resolves_after_flags() {
     mkdir -p "$SANDBOX/bad" "$SANDBOX/good/apps" "$SANDBOX/bin"
     git init -q "$SANDBOX/bad"
     : >"$SANDBOX/good/apps/apps.tsv"
-    cp "$REPO_DIR/apps/lib.sh" "$SANDBOX/good/apps/lib.sh"
+    cp "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/good/apps/lib.sh"
     printf '#!/bin/sh\necho "%s"\n' "$SANDBOX/bad" >"$SANDBOX/bin/chezmoi"
     chmod +x "$SANDBOX/bin/chezmoi"
     OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/bin:$PATH" bash "$BUILD" --help 2>&1)"
