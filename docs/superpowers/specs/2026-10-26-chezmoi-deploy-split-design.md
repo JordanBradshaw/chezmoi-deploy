@@ -43,7 +43,7 @@ JordanBradshaw/chezmoi                     JordanBradshaw/chezmoi-deploy
 ├─ scripts/install-apps.sh  (reads apps/)  ├─ .github/workflows/ resolve.yml publish.yml
 ├─ scripts/kde/, merge-zsh-history.py      │                    builder-image.yml features.yml
 ├─ install.sh, eget.sh, other/             ├─ tests/ build_tools_test.sh portable_test.sh
-├─ .github/workflows/nightly.yml           │        fixtures/chezmoi/   (minimal chezmoi tree)
+├─ .github/workflows/nightly.yml           │        (need a chezmoi checkout: CHEZMOI_SRC)
 └─ tests/ zsh/ install_apps fonts tmux     └─ docs/superpowers/ (portable specs and plans)
          history_merge zsh_startup apps
 ```
@@ -70,9 +70,11 @@ knows (the header row is the contract; changing columns is a coordinated
 change in both repos).
 
 Every bundle carries `BUILDINFO`: chezmoi commit (plus `-dirty`), wrapper
-commit, profile, build date. `input_stamp` hashes the chezmoi tree's
-`home/` and `apps/` plus the wrapper's `portable/`, so a change on either
-side changes `VERSION` and `zssh` pushes the new bundle.
+commit, arch or profile, build date. It is written after `VERSION` is
+computed and is not part of it, so `VERSION` stays a pure content hash.
+`input_stamp` hashes the chezmoi tree's `home/` and `apps/` plus the
+wrapper's `portable/`, so a change on either side triggers a rebuild, and
+a changed bundle gets a new `VERSION` that `zssh` pushes.
 
 `builder.sh run` mounts the wrapper at `/src` and `CHEZMOI_SRC` at
 `/chezmoi`, and sets `CHEZMOI_SRC=/chezmoi` inside the container.
@@ -112,8 +114,9 @@ Consumers:
   lock format.
 
 `apps/lib.sh` (sourced by both repos; no python/yq, runs on bare hosts):
-`apps_rows [--tier T] [--bundle]`, `apps_field ROW COLUMN` (by header name,
-never by position), plus `fetch_release` and `elf_arch` moved from
+`apps_load [FILE]` (parse and validate; columns found by header name, never
+by position), `apps_names [--tier T | --bundle]`, `app NAME COLUMN`, plus
+`fetch_release`, `elf_arch` and their helpers moved from
 `scripts/portable/lib.sh`, so "download a release for an arch" has one
 implementation.
 
@@ -125,27 +128,32 @@ packages and latest releases.
 Merging the rows: union of both tables by binary name. Where both define
 an eget spec, the tools.tsv form wins (it has arch fallbacks); where only
 install-apps has one (e.g. `starship`, `nushell`), it is converted to
-`release`/`file`/`assets`.
+`release`/`file`/`assets`. `install-apps --build cargo` follows the `build`
+column, so tools whose bundle build is `release` (`atuin`, `usbtree`) are
+no longer rebuilt natively on hosts; the old `usbtree` crate was an
+unrelated project anyway.
 
 ## 4. Thin `zssh` (chezmoi dotfile)
 
-`zssh [--rebuild] [--refresh] [--profile P] [ssh options] host`, deploy
-logic (probe, upload, `setup.sh`, `enter`) unchanged. Only how it gets a
-bundle changes, first match wins:
+`zssh [--rebuild] [--refresh] [ssh options] host`, deploy logic (probe,
+upload, `setup.sh`, `enter`) unchanged. Only how it finds the builder
+changes, first match wins (`ZSSH_BUILDER` still overrides all, for tests):
 
 1. `$ZSSH_DEPLOY`: a wrapper checkout; runs `$ZSSH_DEPLOY/portable/build.sh`
    with `CHEZMOI_SRC` = chezmoi's source top level.
 2. `~/.local/share/chezmoi-deploy`: same, from a chezmoi `git-repo`
    external that only desktop machines get (`.chezmoiexternal.toml.tmpl`,
    `refreshPeriod = "168h"`).
-3. Published bundle: download `zsh-portable-<profile>.tar.gz`, its
-   `.version` and `SHA256SUMS` from the wrapper's `bundles` GitHub release
-   into `~/.cache/zsh-portable/published/`, verify, use. Only `x86_64-v3` is
-   published there; other hosts fail with "no published bundle for
-   <arch>; set ZSSH_DEPLOY to a chezmoi-deploy checkout".
+3. Neither: fail with "zssh: no chezmoi-deploy checkout; set ZSSH_DEPLOY
+   or run chezmoi apply on a desktop".
 
-Host to build target: `--profile P` if given, else `--arch $(uname -m)` as
-today. Published lookup maps `x86_64` to `x86_64-v3`.
+`ZSSH_REPO` goes away. The builder is called with `--arch $(uname -m)` as
+today, with `CHEZMOI_SRC` exported (kept if already set).
+
+**Deferred to rolling-bundles phase 2** (needs `build.sh --profile`, which
+does not exist yet): `zssh --profile P`, and a third fallback that
+downloads the published `zsh-portable-x86_64-v3.tar.gz` (+ `.version`,
+`SHA256SUMS`) from the wrapper's `bundles` release.
 
 ## 5. CI
 
@@ -162,7 +170,9 @@ update <date>` in chezmoi with the version diff and failed tools listed.
 
 **chezmoi `tests.yml`**: runs chezmoi's tests on PRs, including the lock PRs.
 
-**wrapper `publish.yml`** (push to `main`, nightly schedule, manual with a
+**wrapper `publish.yml`** (deferred to rolling-bundles phase 2, which adds
+`build.sh --profile`; recorded here so the design is whole) (push to
+`main`, nightly schedule, manual with a
 `chezmoi_ref` input): checks out chezmoi `main` (or the ref), runs
 `build.sh --profile x86_64-v3 --locked`, and skips if `VERSION` equals the
 current `bundles` release's. Otherwise it uploads to the rolling release
@@ -178,8 +188,10 @@ when `features/src/zsh-builder/` or `features/builder/` change.
 `ghcr.io/jordanbradshaw/chezmoi-deploy/<id>` when a
 `devcontainer-feature.json` version changes.
 
-**wrapper `tests.yml`**: wrapper tests against `tests/fixtures/chezmoi` and
-against a fresh chezmoi `main` checkout.
+**wrapper `tests.yml`** (push, PR, nightly): wrapper tests against a fresh
+chezmoi `main` checkout. Tests that need specific manifest rows or locks
+write them per test (`APPS_FILE`, `LOCKS_DIR`), as `build_tools_test.sh`
+already does; a fixture copy of `apps/lib.sh` would drift from the real one.
 
 The work-GitLab `qos-orin` jobs (phase 4 of the rolling-bundles spec) use
 the same entry points and are out of scope here.
@@ -213,23 +225,27 @@ the same entry points and are out of scope here.
 ### Step 1: build the seam in zsh-config
 
 On branch `split-seam` off `rolling-bundles`, each a reviewed commit with
-tests:
+tests. The wrapper's files take their final names here
+(`scripts/portable/` → `portable/`), so the split itself only filters
+paths. The two path lists live in `split/chezmoi.paths` and
+`split/deploy.paths` (in neither result) and drive both the seam test and
+filter-repo.
 
 1. `apps/apps.tsv` from both tables; `apps/lib.sh`; locks moved to
    `apps/locks/`; `tests/apps_test.sh` (11 fields per row, known tiers,
    `bundle=y` rows have `release` or `build`, every lock name in the
    manifest, header matches).
 2. `install-apps.sh` reads the manifest; `install_apps_test.sh` passes.
-3. `build-tools.sh` and `build.sh` take `CHEZMOI_SRC` (default during this
-   step: the repo's own top level) and read `apps/`; `tools.tsv` deleted;
-   `BUILDINFO` added.
+3. `build-tools.sh` and `build.sh` take `CHEZMOI_SRC` (section 2
+   resolution; tests set it explicitly) and read `apps/`; `tools.tsv`
+   deleted; `BUILDINFO` added. The install-apps run_onchange script also
+   hashes `apps/apps.tsv` and `apps/lib.sh`.
 4. `builder.sh` mounts `CHEZMOI_SRC` at `/chezmoi`.
-5. Thin `zssh` with the three-step resolution.
+5. Thin `zssh` (section 4).
 6. Decouple tests from history and each other: `zsh_startup_test.sh`'s
-   `git show 293e292:…` and `git show $rev:…` become checked-in fixtures
-   (filter-repo rewrites hashes); every test file runs from either future
-   repo's tree; `tests/fixtures/chezmoi/` (minimal `home/`, `apps/`) for
-   wrapper unit tests.
+   `git show 293e292:…` and `git show $rev:…` become checked-in fixtures in
+   `tests/fixtures/legacy/` (filter-repo rewrites hashes); every test file
+   runs from either future repo's tree, wrapper tests with `CHEZMOI_SRC`.
 7. Seam test: copy only the future chezmoi paths and only the future
    wrapper paths into two temp dirs, run both suites there. This proves
    neither side reaches into the other except through section 2.
@@ -245,21 +261,25 @@ From `split-seam`, two fresh clones, `git filter-repo`:
   `docs/superpowers/specs/2026-10-24-yupps-zsh-split-design.md`. Result
   lives at `~/repos/chezmoi`; push to `JordanBradshaw/chezmoi` `main`
   (the remote has no commits; this replaces nothing).
-- **chezmoi-deploy**: keep `scripts/portable/` (renamed to `portable/`),
-  `features/`, `tests/build_tools_test.sh`, `tests/portable_test.sh`,
-  `tests/fixtures/chezmoi/`, and the portable/rolling specs, plans and
-  this spec. Fix paths for the rename and update `documentationURL`s. Push
-  to `JordanBradshaw/chezmoi-deploy` `main` (the GitHub repo does not exist
-  yet; the owner creates it, empty and public). The result goes into
-  `~/repos/chezmoi-deploy` with `git init` + fetch from the filtered clone
-  (the dir is not empty), keeping `.opencode/`, which is added to
-  `.gitignore`.
+- **chezmoi-deploy**: keep `portable/` (and `scripts/portable/` for
+  history), `features/`, `tests/build_tools_test.sh`,
+  `tests/portable_test.sh`, and the
+  portable/rolling specs, plans and this spec; update `documentationURL`s.
+  Push to `JordanBradshaw/chezmoi-deploy` `main` (the GitHub repo does not
+  exist yet; create it with `gh repo create`, public, empty). The result
+  goes into `~/repos/chezmoi-deploy` with `git init` + fetch from the
+  filtered clone (the dir is not empty), keeping `.opencode/`, which is
+  added to `.gitignore`.
 - Add a `.devcontainer/` to the wrapper using the `zsh-builder` feature.
 - Run both suites in their new repos, and the wrapper's suite against a
   fresh chezmoi clone.
 
 ### Step 3: switch over
 
+- In chezmoi (now that the wrapper repo exists): add the desktop-only
+  `chezmoi-deploy` external (section 4), and point
+  `.devcontainer/devcontainer.json`'s `postCreateCommand` at
+  `JordanBradshaw/chezmoi` instead of zsh-config's `config` branch.
 - This machine: set `sourceDir = "/home/jbradshaw/repos/chezmoi"` in
   `~/.config/chezmoi/chezmoi.toml`, then `chezmoi diff` (expect no target
   changes beyond the thin `zssh` and the desktop-only chezmoi-deploy
@@ -271,8 +291,10 @@ From `split-seam`, two fresh clones, `git filter-repo`:
 
 ### Step 4: CI
 
-Add the workflows in section 5, wrapper first (`builder-image`, `tests`,
-`publish`, `resolve`), then chezmoi's `nightly` and `tests`.
+Add the workflows in section 5 except `publish`, wrapper first
+(`builder-image`, `features`, `tests`, `resolve`), then chezmoi's
+`nightly` and `tests`. The wrapper's `tests` also runs nightly, against
+chezmoi `main`.
 
 ## Non-goals
 
@@ -284,7 +306,7 @@ Add the workflows in section 5, wrapper first (`builder-image`, `tests`,
 ## Risks
 
 - **Interface drift.** A chezmoi change can break wrapper builds unnoticed.
-  The wrapper's nightly `publish` and `tests` run against chezmoi `main`,
+  The wrapper's nightly `tests` run against chezmoi `main`,
   so breakage shows up within a day; the header check fails loudly.
 - **Rewritten hashes.** filter-repo rewrites commit hashes. Step 1.6
   removes every hash reference in tests, and old hashes stay valid in the
