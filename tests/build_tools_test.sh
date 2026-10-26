@@ -18,6 +18,9 @@ FAIL=0
 
 setup() {
     SANDBOX="$(mktemp -d)"
+    export SANDBOX
+    unset TOOLS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL \
+        STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF
     OUTPUT=""
     STATUS=0
 }
@@ -311,6 +314,180 @@ test_only_keeps_other_lock_entries() {
     btp 'load_profile x86_64-v3; ONLY=rg; resolve_versions resolve; write_lock'
     grep -qx $'fzf\tgo:github.com/junegunn/fzf\tv0.60.0' "$LOCKS_DIR/x86_64-v3.lock" || fail "fzf entry dropped: $(cat "$LOCKS_DIR/x86_64-v3.lock")"
     grep -qx $'rg\tcrate:ripgrep:rg\t15.2.0' "$LOCKS_DIR/x86_64-v3.lock" || fail "rg not updated"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Recipes
+# ---------------------------------------------------------------------------
+
+# make_elf ARCH FILE: a minimal file elf_arch reads as an ARCH binary.
+make_elf() {
+    local machine
+    case $1 in x86_64) machine='\x3e\x00' ;; aarch64) machine='\xb7\x00' ;; esac
+    printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00$machine" >"$2"
+    chmod +x "$2"
+}
+
+# recipe_stubs: cargo, go, eget stubs (plus curl from stubs_setup) that log
+# their arguments and the build settings they see, and leave fake binaries
+# where the real tools would.
+recipe_stubs() {
+    stubs_setup
+    export XDG_CACHE_HOME="$SANDBOX/cache" CROSS_DIR="$SANDBOX/cross"
+    MAKE_ELF="$(declare -f make_elf)"
+    export MAKE_ELF
+    cat >"$STUBS/cargo" <<'EOF'
+#!/usr/bin/env bash
+eval "$MAKE_ELF"
+echo "cargo $* [in ${PWD##*/}]" >>"$STUB_LOG"
+echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" >>"$STUB_LOG"
+[[ -n ${STUB_CARGO_FAIL:-} ]] && exit 101
+target="" bin=""
+while (( $# )); do
+    case $1 in --target) target=${2%%.[0-9]*}; shift ;; --bin) bin=$2; shift ;; esac
+    shift
+done
+mkdir -p "$CARGO_TARGET_DIR/$target/release"
+make_elf "${STUB_ELF_ARCH:-x86_64}" "$CARGO_TARGET_DIR/$target/release/$bin"
+EOF
+    cat >"$STUBS/go" <<'EOF'
+#!/usr/bin/env bash
+eval "$MAKE_ELF"
+echo "go $*" >>"$STUB_LOG"
+echo "go-env GOOS=$GOOS GOARCH=$GOARCH GOAMD64=${GOAMD64:-} CGO_ENABLED=$CGO_ENABLED" >>"$STUB_LOG"
+pkg="${@: -1}"; pkg=${pkg%@*}; name=${pkg##*/}
+[[ $name =~ ^v[0-9]+$ ]] && { pkg=${pkg%/*}; name=${pkg##*/}; }
+dir="$GOPATH/bin"
+[[ -n ${STUB_GO_CROSS:-} ]] && dir="$GOPATH/bin/linux_$GOARCH"
+mkdir -p "$dir"
+make_elf "${STUB_ELF_ARCH:-x86_64}" "$dir/$name"
+EOF
+    cat >"$STUBS/eget" <<'EOF'
+#!/usr/bin/env bash
+eval "$MAKE_ELF"
+echo "eget $*" >>"$STUB_LOG"
+[[ -n ${STUB_EGET_FAIL:-} ]] && exit 1
+out=""
+for ((i = 1; i <= $#; i++)); do [[ ${!i} == --to ]] && { j=$((i + 1)); out=${!j}; }; done
+make_elf "${STUB_ELF_ARCH:-x86_64}" "$out"
+EOF
+    chmod +x "$STUBS/cargo" "$STUBS/go" "$STUBS/eget"
+    mkdir -p "$CROSS_DIR"
+}
+
+# crate_fixture CRATE VERSION [nolock]: the crates.io download for CRATE.
+crate_fixture() {
+    local d="$SANDBOX/pkg/$1-$2"
+    mkdir -p "$d"
+    printf '[package]\nname = "%s"\n' "$1" >"$d/Cargo.toml"
+    [[ ${3:-} == nolock ]] || : >"$d/Cargo.lock"
+    tar -czf "$FIXTURES/$(printf '%s' "https://crates.io/api/v1/crates/$1/$2/download" | tr '/:' '__')" \
+        -C "$SANDBOX/pkg" "$1-$2"
+}
+
+test_crate_build_uses_zigbuild_target_and_cpu() {
+    recipe_stubs
+    crate_fixture ripgrep 15.2.0
+    btp 'load_profile x86_64-v3; build_recipe rg crate:ripgrep:rg BurntSushi/ripgrep rg - 15.2.0 "$SANDBOX/out/rg"'
+    assert_eq "$STATUS" 0
+    grep -qx "cargo zigbuild --release --locked --target x86_64-unknown-linux-musl --bin rg \[in ripgrep-15.2.0\]" "$STUB_LOG" ||
+        fail "cargo call: $(cat "$STUB_LOG")"
+    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=x86-64-v3 LTO=fat CGU=1" "$STUB_LOG" || fail "cargo env: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/rg ]] || fail "no binary"
+    return 0
+}
+
+test_crate_qos_target_keeps_glibc_suffix() {
+    recipe_stubs
+    crate_fixture ripgrep 15.2.0
+    STUB_ELF_ARCH=aarch64 btp 'load_profile qos-orin; build_recipe rg crate:ripgrep:rg BurntSushi/ripgrep rg - 15.2.0 "$SANDBOX/out/rg"'
+    grep -q -- "--target aarch64-unknown-linux-gnu.2.39 " "$STUB_LOG" || fail "target: $(cat "$STUB_LOG")"
+    grep -q "RUSTFLAGS=-C target-cpu=cortex-a78ae " "$STUB_LOG" || fail "cpu"
+    [[ -x $SANDBOX/out/rg ]] || fail "binary not taken from the suffix-less target dir"
+    return 0
+}
+
+test_crate_without_cargo_lock_builds_unlocked() {
+    recipe_stubs
+    crate_fixture diskwatch 0.7.0 nolock
+    btp 'load_profile x86_64-v3; build_recipe diskwatch crate:diskwatch x/diskwatch diskwatch - 0.7.0 "$SANDBOX/out/diskwatch"'
+    assert_eq "$STATUS" 0
+    grep -q "^cargo zigbuild --release --target" "$STUB_LOG" || fail "expected no --locked: $(cat "$STUB_LOG")"
+    return 0
+}
+
+test_crate_bin_differs_from_crate() {
+    recipe_stubs
+    crate_fixture tailspin 7.0.0
+    btp 'load_profile x86_64-v3; build_recipe tspin crate:tailspin:tspin x/tailspin tspin - 7.0.0 "$SANDBOX/out/tspin"'
+    grep -q -- "--bin tspin " "$STUB_LOG" || fail "bin: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/tspin ]] || fail "no tspin"
+    return 0
+}
+
+test_crate_extra_args_passed() {
+    recipe_stubs
+    crate_fixture atuin 18.0.0
+    btp 'load_profile x86_64-v3; build_recipe atuin crate:atuin:atuin:--no-default-features,--features=client x/atuin atuin - 18.0.0 "$SANDBOX/out/atuin"'
+    grep -q -- "--bin atuin --no-default-features --features=client " "$STUB_LOG" || fail "args: $(cat "$STUB_LOG")"
+    return 0
+}
+
+test_crate_build_failure_fails() {
+    recipe_stubs
+    crate_fixture ripgrep 15.2.0
+    STUB_CARGO_FAIL=1 btp 'load_profile x86_64-v3; build_recipe rg crate:ripgrep:rg x/rg rg - 15.2.0 "$SANDBOX/out/rg"'
+    [[ $STATUS -ne 0 ]] || fail "failure not reported"
+    [[ -e $SANDBOX/out/rg ]] && fail "binary left behind"
+    return 0
+}
+
+test_go_build_env_and_flags() {
+    recipe_stubs
+    btp 'load_profile x86_64-v3; build_recipe fzf go:github.com/junegunn/fzf junegunn/fzf fzf - v0.66.0 "$SANDBOX/out/fzf"'
+    assert_eq "$STATUS" 0
+    grep -qx "go install -trimpath -ldflags=-s -w github.com/junegunn/fzf@v0.66.0" "$STUB_LOG" || fail "go call: $(cat "$STUB_LOG")"
+    grep -qx "go-env GOOS=linux GOARCH=amd64 GOAMD64=v3 CGO_ENABLED=0" "$STUB_LOG" || fail "go env: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/fzf ]] || fail "no binary"
+    return 0
+}
+
+test_go_major_version_suffix_and_subpackage() {
+    recipe_stubs
+    btp 'load_profile x86_64-v3; build_recipe direnv go:github.com/direnv/direnv/v2 direnv/direnv direnv - v2.38.2 "$SANDBOX/out/direnv"
+         build_recipe tool go:github.com/x/mod//cmd/tool x/mod tool - v1.0.0 "$SANDBOX/out/tool"'
+    [[ -x $SANDBOX/out/direnv ]] || fail "direnv not found under its /v2 module"
+    grep -q "go install .* github.com/x/mod/cmd/tool@v1.0.0" "$STUB_LOG" || fail "subpackage: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/tool ]] || fail "no tool"
+    return 0
+}
+
+test_go_cross_binary_found_in_goarch_dir() {
+    recipe_stubs
+    STUB_GO_CROSS=1 STUB_ELF_ARCH=aarch64 btp 'load_profile qos-orin; build_recipe fzf go:github.com/junegunn/fzf junegunn/fzf fzf - v0.66.0 "$SANDBOX/out/fzf"'
+    assert_eq "$STATUS" 0
+    [[ -x $SANDBOX/out/fzf ]] || fail "binary in bin/linux_arm64 not found"
+    return 0
+}
+
+test_cross_needs_sdk_profile() {
+    recipe_stubs
+    printf '#!/usr/bin/env bash\necho "cross $*" >>"$STUB_LOG"\nprintf x >"$2"\n' >"$CROSS_DIR/tmux.sh"
+    chmod +x "$CROSS_DIR/tmux.sh"
+    btp 'load_profile x86_64-v3; build_recipe tmux cross:tmux cross:tmux tmux - recipe "$SANDBOX/out/tmux"'
+    [[ $STATUS -ne 0 ]] || fail "cross recipe ran without the SDK"
+    btp 'load_profile qos-orin; build_recipe tmux cross:tmux cross:tmux tmux - recipe "$SANDBOX/out/tmux"'
+    assert_eq "$STATUS" 0
+    grep -qx "cross aarch64 $SANDBOX/out/tmux" "$STUB_LOG" || fail "cross call: $(cat "$STUB_LOG")"
+    return 0
+}
+
+test_release_passes_tag() {
+    recipe_stubs
+    btp 'load_profile x86_64-v3; build_recipe lnav release tstack/lnav lnav musl v0.14.1 "$SANDBOX/out/lnav"'
+    assert_eq "$STATUS" 0
+    grep -q "^eget .*--tag v0.14.1 .*tstack/lnav$" "$STUB_LOG" || fail "eget: $(cat "$STUB_LOG")"
     return 0
 }
 
