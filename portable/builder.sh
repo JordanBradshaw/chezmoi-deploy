@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE=${BUILDER_IMAGE:-zsh-builder:local}
 XDG_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}
 CACHE="$XDG_CACHE/zsh-portable"
@@ -35,7 +35,7 @@ case ${1:-} in
         # GitHub API limits: the host's token (env, secrets file or gh),
         # passed by name so it stays off the command line.
         # shellcheck source=lib.sh
-        source "$REPO/scripts/portable/lib.sh"
+        source "$REPO/portable/lib.sh"
         load_github_token
         mkdir -p "$CACHE/home" "$CACHE/xdg-cache"
         tty=()

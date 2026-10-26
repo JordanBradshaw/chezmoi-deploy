@@ -21,7 +21,7 @@
 #   fails keeps its newest cached build, else its release download; it never
 #   fails the run. DIR gets bin/<name> for every tool and tools.lock.
 #
-#   Run inside the builder image (scripts/portable/builder.sh run ...), which
+#   Run inside the builder image (portable/builder.sh run ...), which
 #   has the toolchains.
 
 PORTABLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
