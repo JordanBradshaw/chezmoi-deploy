@@ -56,7 +56,7 @@ log() { echo "build-tools: $*" >&2; }
 die() { echo "build-tools: error: $*" >&2; exit 1; }
 
 usage() {
-    sed -n '3,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # load_profile NAME: set PROFILE_NAME PROFILE_ARCH RUST_TARGET RUST_CPU
