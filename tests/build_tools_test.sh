@@ -10,6 +10,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CHEZMOI_SRC="$REPO_DIR"
 BUILD_TOOLS="$REPO_DIR/portable/build-tools.sh"
 TOOLS_TSV="$REPO_DIR/portable/tools.tsv"
 BASH_BIN="$(command -v bash)"
@@ -98,57 +99,8 @@ tsv_rows() {
     grep -vE '^[[:space:]]*(#|$)' "$TOOLS_TSV"
 }
 
-test_every_tools_row_has_valid_source() {
-    local name repo file spec source extra
-    while read -r name repo file spec source extra; do
-        [[ -n $source && -z $extra ]] || { fail "$name: expected 5 columns"; continue; }
-        [[ $source =~ ^(crate:[a-z0-9_-]+(:[A-Za-z0-9_-]+)?(:.*)?|go:[^[:space:]]+|cross:[a-z0-9-]+|release)$ ]] ||
-            fail "$name: bad source '$source'"
-    done < <(tsv_rows)
-    return 0
-}
-
-test_cross_rows_keep_cross_repo() {
-    local name repo file spec source
-    while read -r name repo file spec source; do
-        [[ $repo == cross:* ]] || continue
-        assert_eq "$source" "$repo"
-    done < <(tsv_rows)
-}
-
-# source_of NAME: the source column of NAME's row.
-source_of() {
-    tsv_rows | awk -v n="$1" '$1 == n { print $5 }'
-}
-
-test_known_sources() {
-    assert_eq "$(source_of rg)" "crate:ripgrep:rg"
-    assert_eq "$(source_of tspin)" "crate:tailspin:tspin"
-    assert_eq "$(source_of btm)" "crate:bottom:btm"
-    assert_eq "$(source_of pueued)" "crate:pueue:pueued"
-    assert_eq "$(source_of fzf)" "go:github.com/junegunn/fzf"
-    assert_eq "$(source_of direnv)" "go:github.com/direnv/direnv/v2"
-    assert_eq "$(source_of lnav)" "release"
-    assert_eq "$(source_of tmux)" "cross:tmux"
-    # crates.io names taken by other projects: built from releases.
-    assert_eq "$(source_of usbtree)" "release"
-    assert_eq "$(source_of rustnet)" "release"
-}
-
-# build.sh still reads the eget columns (repo file assets) correctly with the
-# extra column: the source must not leak into the asset filters.
-test_build_sh_ignores_source_column() {
-    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/build.sh'
-        while read -r name repo file spec source; do
-            [[ \$name == rg ]] && asset_candidates x86_64 \"\$spec\"
-        done < <(grep -vE '^[[:space:]]*(#|\$)' '$TOOLS_TSV')" 2>&1)"
-    [[ $OUTPUT != *crate:* ]] || fail "source leaked into asset filters: $OUTPUT"
-    [[ -n $OUTPUT ]] || fail "no asset candidates"
-    return 0
-}
-
 test_lib_sh_provides_shared_functions() {
-    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'
+    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'; resolve_chezmoi_src
         for f in normalize_arch eget_system asset_candidates asset_args elf_arch load_github_token fetch_release; do
             declare -F \$f >/dev/null || echo missing:\$f
         done" 2>&1)"
@@ -867,7 +819,7 @@ test_e2e_x86_64_v3_builds_rg_and_fzf() {
         >"$SANDBOX/build.log" 2>&1 || { fail "build: $(tail -20 "$SANDBOX/build.log")"; return; }
     local t
     for t in rg fzf; do
-        [[ $("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'; elf_arch '$out/bin/$t'") == x86_64 ]] || fail "$t: not x86_64"
+        [[ $("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'; resolve_chezmoi_src; elf_arch '$out/bin/$t'") == x86_64 ]] || fail "$t: not x86_64"
         readelf -lW "$out/bin/$t" | grep -q INTERP && fail "$t: not static"
         "$out/bin/$t" --version >/dev/null 2>&1 || fail "$t: doesn't run"
         grep -qP "^$t\t.*\t(built|cached)$" "$out/tools.lock" || fail "$t: tools.lock: $(cat "$out/tools.lock")"

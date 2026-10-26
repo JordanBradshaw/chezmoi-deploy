@@ -58,6 +58,7 @@ die() { echo "build: error: $*" >&2; exit 1; }
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+resolve_chezmoi_src || return 1 2>/dev/null || exit 1
 
 # git_externals TOML PATH...: print "path<TAB>url<TAB>clone args" for every
 # git-repo external in a rendered .chezmoiexternal.toml that lies in one of

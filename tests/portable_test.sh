@@ -15,6 +15,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CHEZMOI_SRC="$REPO_DIR"
 BUILD="$REPO_DIR/portable/build.sh"
 ZSSH="$REPO_DIR/home/dot_local/bin/executable_zssh"
 

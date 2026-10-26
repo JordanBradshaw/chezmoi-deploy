@@ -36,6 +36,7 @@ case ${1:-} in
         # passed by name so it stays off the command line.
         # shellcheck source=lib.sh
         source "$REPO/portable/lib.sh"
+        resolve_chezmoi_src || exit 1
         load_github_token
         mkdir -p "$CACHE/home" "$CACHE/xdg-cache"
         tty=()
