@@ -26,6 +26,16 @@
 
 PORTABLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$PORTABLE_DIR/profiles"
+TOOLS_FILE=${TOOLS_FILE:-$PORTABLE_DIR/tools.tsv}
+LOCKS_DIR=${LOCKS_DIR:-$PORTABLE_DIR/locks}
+
+# shellcheck source=lib.sh
+source "$PORTABLE_DIR/lib.sh"
+
+# Per tool, from tools.tsv (in file order: NAMES) and the lock (LOCK).
+declare -a NAMES=()
+declare -gA SOURCES=() REPOS=() FILES=() SPECS=() LOCK=()
+ONLY=""
 
 log() { echo "build-tools: $*" >&2; }
 die() { echo "build-tools: error: $*" >&2; exit 1; }
@@ -52,6 +62,131 @@ load_profile() {
 # in target/<dir>/release.
 rust_target_dir() {
     echo "${RUST_TARGET%%.[0-9]*}"
+}
+
+# selected NAME: whether NAME is in --only (all tools without it).
+selected() {
+    [[ -z $ONLY || ,$ONLY, == *",$1,"* ]]
+}
+
+# load_tools: the per-tool arrays for every tools.tsv row, and NAMES (file
+# order) for the rows --only selects.
+load_tools() {
+    local name repo file spec source
+    NAMES=()
+    while read -r name repo file spec source; do
+        [[ -z $name || $name == \#* ]] && continue
+        REPOS[$name]=$repo FILES[$name]=$file SPECS[$name]=$spec SOURCES[$name]=$source
+        selected "$name" && NAMES+=("$name")
+    done <"$TOOLS_FILE"
+}
+
+# http_get URL: the body of URL; GitHub API calls carry the token if any.
+http_get() {
+    local -a auth=()
+    if [[ $1 == https://api.github.com/* ]]; then
+        load_github_token
+        [[ -n ${EGET_GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer $EGET_GITHUB_TOKEN")
+    fi
+    curl -fsSL --max-time 30 -A zsh-config-build-tools "${auth[@]}" "$1"
+}
+
+# json_get KEY...: the value at the KEY path of the JSON document on stdin.
+json_get() {
+    python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+for k in sys.argv[1:]:
+    v = v[k]
+print(v)
+' "$@"
+}
+
+# latest_version SOURCE REPO: the newest upstream version for a tool.
+latest_version() {
+    local source=$1 repo=$2 module body version
+    case $source in
+        crate:*)
+            IFS=: read -r _ module _ <<<"$source"
+            body="$(http_get "https://crates.io/api/v1/crates/$module")" || return 1
+            json_get crate max_stable_version <<<"$body"
+            ;;
+        go:*)
+            module=${source#go:}
+            module=${module%%//*}
+            # The module proxy spells an uppercase letter as ! + lowercase.
+            body="$(http_get "https://proxy.golang.org/$(sed 's/[A-Z]/!\L&/g' <<<"$module")/@latest")" || return 1
+            version="$(json_get Version <<<"$body")" || return 1
+            # Without v-prefixed semver tags the proxy only has pseudo-versions
+            # of the default branch; the GitHub release tag is the release
+            # (go install accepts a plain tag name).
+            if [[ $version =~ -[0-9]{14}-[0-9a-f]{12}$ && $repo == */* ]] &&
+                body="$(http_get "https://api.github.com/repos/$repo/releases/latest")"; then
+                json_get tag_name <<<"$body" && return 0
+            fi
+            echo "$version"
+            ;;
+        cross:*)
+            echo recipe
+            ;;
+        release)
+            body="$(http_get "https://api.github.com/repos/$repo/releases/latest")" || return 1
+            json_get tag_name <<<"$body"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# lock_file: the profile's lock.
+lock_file() {
+    echo "$LOCKS_DIR/$PROFILE_NAME.lock"
+}
+
+# read_lock: LOCK from the profile's lock, if there is one.
+read_lock() {
+    local name source version file
+    file="$(lock_file)"
+    LOCK=()
+    [[ -r $file ]] || return 0
+    while IFS=$'\t' read -r name source version; do
+        [[ -z $name || $name == \#* ]] && continue
+        LOCK[$name]=$version
+    done <"$file"
+}
+
+# write_lock: the profile's lock from LOCK, sorted, for every tool in
+# tools.tsv (entries of tools outside --only are kept as they were).
+write_lock() {
+    local file name
+    file="$(lock_file)"
+    mkdir -p "$LOCKS_DIR"
+    {
+        echo "# build-tools.sh lock for $PROFILE_NAME: name, source, version. Rewrite with --resolve."
+        for name in "${!LOCK[@]}"; do
+            [[ -n ${LOCK[$name]} && -n ${SOURCES[$name]:-} ]] || continue
+            printf '%s\t%s\t%s\n' "$name" "${SOURCES[$name]}" "${LOCK[$name]}"
+        done | sort
+    } >"$file.tmp"
+    mv "$file.tmp" "$file"
+}
+
+# resolve_versions MODE: fill LOCK for the selected tools. locked: the lock's
+# versions, looking up only tools missing from it; resolve: look up every
+# tool, keeping the old entry when a lookup fails.
+resolve_versions() {
+    local mode=$1 name version
+    [[ ${#NAMES[@]} -gt 0 ]] || load_tools
+    read_lock
+    for name in "${NAMES[@]}"; do
+        [[ $mode == locked && -n ${LOCK[$name]:-} ]] && continue
+        if version="$(latest_version "${SOURCES[$name]}" "${REPOS[$name]}")" && [[ -n $version ]]; then
+            LOCK[$name]=$version
+        elif [[ -n ${LOCK[$name]:-} ]]; then
+            log "$name: version lookup failed, keeping ${LOCK[$name]}"
+        else
+            log "$name: version lookup failed, no locked version"
+        fi
+    done
 }
 
 main() {
