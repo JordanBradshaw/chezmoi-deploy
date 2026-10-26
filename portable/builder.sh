@@ -6,7 +6,10 @@
 #                                  features/builder/x86_64.Dockerfile
 #        builder.sh run CMD [ARG]  run CMD in it, from the repo (/src)
 #
-#   CMD runs as the invoking user. The repo is mounted at /src and the
+#   CMD runs as the invoking user. The repo is mounted at /src, the chezmoi
+#   tree (CHEZMOI_SRC, else `chezmoi source-path`; read-write, since
+#   build-tools.sh --resolve rewrites apps/locks) at /chezmoi, passed as
+#   CHEZMOI_SRC=/chezmoi, and the
 #   zsh-portable cache (${XDG_CACHE_HOME:-~/.cache}/zsh-portable) at the same
 #   path as on the host, passed as ZSH_PORTABLE_CACHE so build-tools.sh finds
 #   the same cache. HOME, XDG_CACHE_HOME, cargo's registry and zig's cache
@@ -22,7 +25,7 @@ XDG_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}
 CACHE="$XDG_CACHE/zsh-portable"
 
 usage() {
-    sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case ${1:-} in
@@ -44,6 +47,7 @@ case ${1:-} in
         docker run --rm "${tty[@]}" \
             --user "$(id -u):$(id -g)" \
             -v "$REPO:/src" -w /src \
+            -v "$CHEZMOI_SRC:/chezmoi" -e CHEZMOI_SRC=/chezmoi \
             -v "$CACHE:$CACHE" \
             -e ZSH_PORTABLE_CACHE="$CACHE" \
             -e XDG_CACHE_HOME="$CACHE/xdg-cache" \
