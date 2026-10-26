@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for scripts/portable/build-tools.sh: profiles, tools.tsv sources,
+# Tests for portable/build-tools.sh: profiles, tools.tsv sources,
 # version locks, recipes, verification, cache and fallbacks.
 #
 # Network, compilers and eget are stubs on a sandboxed PATH that log their
@@ -10,8 +10,8 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_TOOLS="$REPO_DIR/scripts/portable/build-tools.sh"
-TOOLS_TSV="$REPO_DIR/scripts/portable/tools.tsv"
+BUILD_TOOLS="$REPO_DIR/portable/build-tools.sh"
+TOOLS_TSV="$REPO_DIR/portable/tools.tsv"
 BASH_BIN="$(command -v bash)"
 PASS=0
 FAIL=0
@@ -138,7 +138,7 @@ test_known_sources() {
 # build.sh still reads the eget columns (repo file assets) correctly with the
 # extra column: the source must not leak into the asset filters.
 test_build_sh_ignores_source_column() {
-    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/scripts/portable/build.sh'
+    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/build.sh'
         while read -r name repo file spec source; do
             [[ \$name == rg ]] && asset_candidates x86_64 \"\$spec\"
         done < <(grep -vE '^[[:space:]]*(#|\$)' '$TOOLS_TSV')" 2>&1)"
@@ -148,7 +148,7 @@ test_build_sh_ignores_source_column() {
 }
 
 test_lib_sh_provides_shared_functions() {
-    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/scripts/portable/lib.sh'
+    OUTPUT="$("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'
         for f in normalize_arch eget_system asset_candidates asset_args elf_arch load_github_token fetch_release; do
             declare -F \$f >/dev/null || echo missing:\$f
         done" 2>&1)"
@@ -763,7 +763,7 @@ test_locked_never_writes_lock() {
 # ---------------------------------------------------------------------------
 
 FEATURE_DIR="$REPO_DIR/features/src/zsh-builder"
-BUILDER="$REPO_DIR/scripts/portable/builder.sh"
+BUILDER="$REPO_DIR/portable/builder.sh"
 
 test_feature_json_valid() {
     OUTPUT="$(python3 - "$FEATURE_DIR/devcontainer-feature.json" <<'EOF'
@@ -863,11 +863,11 @@ test_e2e_x86_64_v3_builds_rg_and_fzf() {
     out="$cache/e2e-out"
     rm -rf "$out" "$cache/e2e-locks"
     "$BASH_BIN" "$BUILDER" run env LOCKS_DIR="$cache/e2e-locks" \
-        scripts/portable/build-tools.sh --profile x86_64-v3 --resolve --only rg,fzf --out "$out" \
+        portable/build-tools.sh --profile x86_64-v3 --resolve --only rg,fzf --out "$out" \
         >"$SANDBOX/build.log" 2>&1 || { fail "build: $(tail -20 "$SANDBOX/build.log")"; return; }
     local t
     for t in rg fzf; do
-        [[ $("$BASH_BIN" -c "source '$REPO_DIR/scripts/portable/lib.sh'; elf_arch '$out/bin/$t'") == x86_64 ]] || fail "$t: not x86_64"
+        [[ $("$BASH_BIN" -c "source '$REPO_DIR/portable/lib.sh'; elf_arch '$out/bin/$t'") == x86_64 ]] || fail "$t: not x86_64"
         readelf -lW "$out/bin/$t" | grep -q INTERP && fail "$t: not static"
         "$out/bin/$t" --version >/dev/null 2>&1 || fail "$t: doesn't run"
         grep -qP "^$t\t.*\t(built|cached)$" "$out/tools.lock" || fail "$t: tools.lock: $(cat "$out/tools.lock")"

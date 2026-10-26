@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for scripts/portable/build.sh and zssh.
+# Tests for portable/build.sh and zssh.
 #
 # build.sh is sourced for its helper functions. zssh runs against a stub ssh
 # that executes remote commands locally with HOME pointing into a sandbox,
@@ -15,13 +15,13 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="$REPO_DIR/scripts/portable/build.sh"
+BUILD="$REPO_DIR/portable/build.sh"
 ZSSH="$REPO_DIR/home/dot_local/bin/executable_zssh"
 
 PASS=0
 FAIL=0
 
-# shellcheck source=../scripts/portable/build.sh
+# shellcheck source=../portable/build.sh
 source "$BUILD"
 
 # ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ test_fetch_tools_skips_unsupported_cross_arch() {
 # setup.sh: disabling tools that can't run
 # ---------------------------------------------------------------------------
 
-SETUP="$REPO_DIR/scripts/portable/remote/setup.sh"
+SETUP="$REPO_DIR/portable/remote/setup.sh"
 
 # fake_tool NAME EXIT STDERR: a bundled tool that exits EXIT after printing
 # STDERR.
@@ -476,7 +476,7 @@ test_git_externals_matches_whole_path_components() {
 # break the stamp, and must change it.
 test_input_stamp_handles_deleted_tracked_files() {
     local repo="$SANDBOX/repo" before after
-    mkdir -p "$repo/home" "$repo/scripts/portable"
+    mkdir -p "$repo/home" "$repo/portable"
     git -C "$repo" init -q
     echo a >"$repo/home/a"
     echo b >"$repo/home/b"

@@ -20,7 +20,7 @@
 #   every value from ~/.config/secrets/env before it is packed.
 #
 #   The bundle is rebuilt only when tracked or untracked files under home/ or
-#   scripts/portable/ change, or the yupps-zsh plugin it ships does (this
+#   portable/ change, or the yupps-zsh plugin it ships does (this
 #   machine's ~/.config/zsh/plugins/yupps-zsh, or $ZSSH_YUPPS_DIR). --force
 #   rebuilds anyway; --refresh also re-downloads zsh, tools and plugins.
 #
@@ -151,7 +151,7 @@ input_stamp() {
         # Tracked files deleted in the working tree count by name only.
         while IFS= read -r -d '' f; do
             if [[ -f $repo/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
-        done < <(cd "$repo" && git ls-files -z -co --exclude-standard -- home scripts/portable | sort -zu)
+        done < <(cd "$repo" && git ls-files -z -co --exclude-standard -- home portable | sort -zu)
         (( ${#present[@]} == 0 )) || (cd "$repo" && sha256sum -- "${present[@]}")
         if [[ -n $dev ]]; then
             echo "yupps $dev"
