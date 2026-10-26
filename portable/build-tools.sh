@@ -33,6 +33,7 @@ CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 
 # shellcheck source=lib.sh
 source "$PORTABLE_DIR/lib.sh"
+resolve_chezmoi_src || return 1 2>/dev/null || exit 1
 
 # Per tool, from tools.tsv (in file order: NAMES) and the lock (LOCK).
 declare -a NAMES=()
