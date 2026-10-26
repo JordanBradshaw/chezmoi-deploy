@@ -29,7 +29,7 @@ PROFILES_DIR="$PORTABLE_DIR/profiles"
 TOOLS_FILE=${TOOLS_FILE:-$PORTABLE_DIR/tools.tsv}
 LOCKS_DIR=${LOCKS_DIR:-$PORTABLE_DIR/locks}
 CROSS_DIR=${CROSS_DIR:-$PORTABLE_DIR/cross}
-CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable"
+CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 
 # shellcheck source=lib.sh
 source "$PORTABLE_DIR/lib.sh"
@@ -79,7 +79,7 @@ load_tools() {
     while read -r name repo file spec source; do
         [[ -z $name || $name == \#* ]] && continue
         REPOS[$name]=$repo FILES[$name]=$file SPECS[$name]=$spec SOURCES[$name]=$source
-        selected "$name" && NAMES+=("$name")
+        if selected "$name"; then NAMES+=("$name"); fi
     done <"$TOOLS_FILE"
 }
 
@@ -194,7 +194,7 @@ resolve_versions() {
 # build_crate NAME SOURCE VERSION OUT: cargo zigbuild the crates.io package
 # for the profile's target and CPU. SOURCE is crate:CRATE[:BIN][:ARGS], ARGS
 # comma-separated cargo arguments. Packages without a Cargo.lock build
-# unlocked.
+# unlocked. Symbols are stripped: the binaries are copied to every host.
 build_crate() {
     local name=$1 source=$2 version=$3 out=$4 crate bin args work dir
     local -a extra=() locked=(--locked)
@@ -213,7 +213,7 @@ build_crate() {
     local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME"
     if (cd "$dir" && env RUSTFLAGS="-C target-cpu=$RUST_CPU" \
         CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-        CARGO_TARGET_DIR="$target_dir" \
+        CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR="$target_dir" \
         cargo zigbuild --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
         && install -D -m755 "$target_dir/$(rust_target_dir)/release/$bin" "$out"; then
         rm -rf "$work"
@@ -297,11 +297,14 @@ verify_binary() {
     return 0
 }
 
-# recipe_hash NAME: short hash of NAME's tools.tsv row and the profile, so a
-# changed recipe or profile never reuses an old build.
+# Build settings applied by build_crate/build_go; part of every cache key.
+BUILD_SETTINGS="cargo: lto=fat codegen-units=1 strip=symbols; go: -trimpath -ldflags=-s -w"
+
+# recipe_hash NAME: short hash of NAME's tools.tsv row, the profile and
+# BUILD_SETTINGS, so a changed recipe never reuses an old build.
 recipe_hash() {
     {
-        printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}"
+        printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}" "$BUILD_SETTINGS"
         cat "$PROFILES_DIR/$PROFILE_NAME.env"
     } | sha256sum | cut -c1-12
 }
