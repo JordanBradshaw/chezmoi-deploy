@@ -52,73 +52,12 @@ EXPORT_EXTERNALS=(
 # Plugins that make no sense on someone else's machine.
 DROP_PLUGINS_RE='plugins/ssh-agent([[:space:]]|$)'
 
-# Release files that are never the binary we want.
-ASSET_EXCLUDES=(^.deb ^.rpm ^.apk ^.msi ^.sha ^.sig ^.asc ^.sbom ^.pem)
 
 log() { echo "build: $*" >&2; }
 die() { echo "build: error: $*" >&2; exit 1; }
 
-# normalize_arch UNAME_M: print the bundle arch name, or fail if unsupported.
-normalize_arch() {
-    case $1 in
-        aarch64 | arm64) echo aarch64 ;;
-        armv7l | armv7 | armhf | armv8l) echo armv7l ;;
-        x86_64 | amd64) echo x86_64 ;;
-        *)
-            echo "unsupported arch: $1 (supported: aarch64, armv7l, x86_64)" >&2
-            return 1
-            ;;
-    esac
-}
-
-# eget_system ARCH: eget --system value for a normalized arch.
-eget_system() {
-    case $1 in
-        aarch64) echo linux/arm64 ;;
-        armv7l) echo linux/arm ;;
-        x86_64) echo linux/amd64 ;;
-    esac
-}
-
-# asset_candidates ARCH SPEC: print one comma-separated filter list per line,
-# in the order to try. An empty line means "no filters".
-asset_candidates() {
-    local arch=$1 spec=$2 alt
-    if [[ $spec == - ]]; then
-        echo
-        return
-    fi
-    local IFS='|'
-    for alt in $spec; do
-        [[ $arch == armv7l ]] && echo "armv7,$alt"
-        echo "$alt"
-    done
-}
-
-# asset_args FILTERS: eget --asset arguments, one per line, for a
-# comma-separated filter list plus excludes for packages and checksums.
-asset_args() {
-    local f fl=()
-    IFS=, read -ra fl <<<"$1"
-    for f in "${fl[@]}" "${ASSET_EXCLUDES[@]}"; do
-        echo "--asset=$f"
-    done
-}
-
-# elf_arch FILE: print the bundle arch an ELF binary was built for.
-elf_arch() {
-    local magic class machine
-    magic="$(head -c4 "$1" 2>/dev/null | od -An -c | tr -d ' ')"
-    [[ $magic == '177ELF' ]] || return 1
-    class="$(od -An -tu1 -j4 -N1 "$1" | tr -d ' ')"
-    machine="$(od -An -tu2 -j18 -N2 --endian=little "$1" | tr -d ' ')"
-    case $class:$machine in
-        2:62) echo x86_64 ;;
-        2:183) echo aarch64 ;;
-        1:40) echo armv7l ;;
-        *) return 1 ;;
-    esac
-}
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # git_externals TOML PATH...: print "path<TAB>url<TAB>clone args" for every
 # git-repo external in a rendered .chezmoiexternal.toml that lies in one of
@@ -233,21 +172,6 @@ tree_hash() {
     ) | sha256sum | cut -c1-16
 }
 
-load_github_token() {
-    [[ -n ${EGET_GITHUB_TOKEN:-} ]] && return 0
-    local secrets="${XDG_CONFIG_HOME:-$HOME/.config}/secrets/env" line
-    if [[ -r $secrets ]]; then
-        while IFS= read -r line; do
-            [[ $line == EGET_GITHUB_TOKEN=* ]] && EGET_GITHUB_TOKEN="${line#EGET_GITHUB_TOKEN=}"
-        done <"$secrets"
-    fi
-    if [[ -z ${EGET_GITHUB_TOKEN:-} ]] && command -v gh >/dev/null 2>&1; then
-        EGET_GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
-    fi
-    [[ -n ${EGET_GITHUB_TOKEN:-} ]] && export EGET_GITHUB_TOKEN
-    return 0
-}
-
 fetch_zsh() {
     local arch=$1 dest=$2
     local name="zsh-$ZSH_BIN_VERSION-linux-$arch"
@@ -281,14 +205,10 @@ fetch_zsh() {
 
 fetch_tools() {
     local arch=$1 dest=$2
-    local dir="$CACHE/tools/$arch" system name repo file spec filters
+    local dir="$CACHE/tools/$arch" name repo file spec source
     mkdir -p "$dir" "$dest"
-    system="$(eget_system "$arch")"
-    # An empty config keeps ~/.eget.toml (target dir, upgrade_only) out of it.
-    : >"$CACHE/eget.toml"
-    load_github_token
 
-    while read -r name repo file spec; do
+    while read -r name repo file spec source; do
         [[ -z $name || $name == \#* ]] && continue
         if [[ -n $REFRESH || $(elf_arch "$dir/$name" 2>/dev/null) != "$arch" ]]; then
             rm -f "$dir/$name"
@@ -303,20 +223,9 @@ fetch_tools() {
                 else
                     rm -f "$dir/$name"
                 fi
+            elif fetch_release "$name" "$repo" "$file" "$spec" "$arch" "$dir/$name"; then
+                ok=1
             fi
-            while [[ $repo != cross:* ]] && IFS= read -r filters; do
-                local args=(--system "$system" --file "$file" --to "$dir/$name" --quiet)
-                mapfile -t -O "${#args[@]}" args < <(asset_args "$filters")
-                if EGET_CONFIG="$CACHE/eget.toml" eget "${args[@]}" "$repo" </dev/null >/dev/null 2>&1; then
-                    # Asset filters can leave a single asset for the wrong
-                    # CPU, which eget takes without checking --system.
-                    if [[ $(elf_arch "$dir/$name") == "$arch" ]]; then
-                        ok=1
-                        break
-                    fi
-                    rm -f "$dir/$name"
-                fi
-            done < <(asset_candidates "$arch" "$spec")
             if [[ -z $ok ]]; then
                 log "warning: no $arch build of $name ($repo), skipping"
                 continue
