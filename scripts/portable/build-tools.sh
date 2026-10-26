@@ -275,6 +275,92 @@ build_recipe() {
     esac
 }
 
+# verify_binary FILE: FILE is an ELF binary for the profile's arch; static for
+# musl targets; for glibc targets with a version suffix (….2.39) it needs no
+# newer GLIBC_ symbol version.
+verify_binary() {
+    local file=$1 arch need max
+    arch="$(elf_arch "$file" 2>/dev/null)" || { log "${file##*/}: not an ELF binary"; return 1; }
+    [[ $arch == "$PROFILE_ARCH" ]] || { log "${file##*/}: built for $arch, not $PROFILE_ARCH"; return 1; }
+    if [[ $RUST_TARGET == *musl* ]] && readelf -lW "$file" 2>/dev/null | grep -q INTERP; then
+        log "${file##*/}: not static (has an ELF interpreter)"
+        return 1
+    fi
+    if [[ $RUST_TARGET =~ gnu\.([0-9]+\.[0-9]+)$ ]]; then
+        max=${BASH_REMATCH[1]}
+        need="$(readelf -VW "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+        if [[ -n $need && $(printf '%s\n%s\n' "$need" "$max" | sort -V | tail -1) != "$max" ]]; then
+            log "${file##*/}: needs GLIBC_$need, target has $max"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# recipe_hash NAME: short hash of NAME's tools.tsv row and the profile, so a
+# changed recipe or profile never reuses an old build.
+recipe_hash() {
+    {
+        printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}"
+        cat "$PROFILES_DIR/$PROFILE_NAME.env"
+    } | sha256sum | cut -c1-12
+}
+
+# cache_path NAME VERSION: where NAME's verified build at VERSION is kept.
+cache_path() {
+    echo "$CACHE_ROOT/tools/$PROFILE_NAME/$1/$2-$(recipe_hash "$1")/$1"
+}
+
+# obtain_tool NAME DEST: put NAME's binary at DEST and set HOW and GOT_VERSION:
+# the cached or freshly built (and verified) locked version, else the newest
+# cached build of any version, else the upstream release. Builds happen in a
+# temp dir and only move into the cache once verified.
+obtain_tool() {
+    local name=$1 dest=$2 version=${LOCK[$1]:-} cached tmp
+    HOW="" GOT_VERSION=""
+    if [[ -n $version ]]; then
+        cached="$(cache_path "$name" "$version")"
+        if [[ -f $cached ]]; then
+            HOW=cached
+        else
+            mkdir -p "$CACHE_ROOT/tmp"
+            tmp="$(mktemp -d "$CACHE_ROOT/tmp/build.XXXXXX")"
+            log "building $name $version for $PROFILE_NAME"
+            if build_recipe "$name" "${SOURCES[$name]}" "${REPOS[$name]}" "${FILES[$name]}" \
+                "${SPECS[$name]}" "$version" "$tmp/$name" && verify_binary "$tmp/$name"; then
+                mkdir -p "$(dirname "$cached")"
+                mv -f "$tmp/$name" "$cached"
+                HOW=built
+            else
+                log "$name: build of $version failed"
+            fi
+            rm -rf "$tmp"
+        fi
+        if [[ -n $HOW ]]; then
+            install -m755 "$cached" "$dest"
+            GOT_VERSION=$version
+            return 0
+        fi
+    fi
+    # Newest cached build of any version, for any recipe.
+    cached="$(ls -t "$CACHE_ROOT/tools/$PROFILE_NAME/$name"/*/"$name" 2>/dev/null | head -1 || true)"
+    if [[ -n $cached ]]; then
+        install -m755 "$cached" "$dest"
+        HOW=fallback-cache
+        GOT_VERSION="$(basename "$(dirname "$cached")")"
+        GOT_VERSION=${GOT_VERSION%-*}
+        return 0
+    fi
+    # The latest upstream release; checked for the arch only, like the
+    # eget-only bundles.
+    if fetch_release "$name" "${REPOS[$name]}" "${FILES[$name]}" "${SPECS[$name]}" "$PROFILE_ARCH" "$dest"; then
+        HOW=fallback-release
+        GOT_VERSION=release
+        return 0
+    fi
+    return 1
+}
+
 main() {
     set -euo pipefail
     local profile="" mode=locked only="" out=""
@@ -291,6 +377,39 @@ main() {
     done
     [[ -n $profile ]] || { usage >&2; exit 2; }
     load_profile "$profile" || exit 2
+    ONLY=$only
+    out=${out:-$CACHE_ROOT/tools-out/$PROFILE_NAME}
+
+    load_tools
+    read_lock
+    local -A old_lock=()
+    local name
+    for name in "${!LOCK[@]}"; do old_lock[$name]=${LOCK[$name]}; done
+    resolve_versions "$mode"
+
+    rm -rf "$out/bin"
+    mkdir -p "$out/bin"
+    local -a lines=() skipped=()
+    for name in "${NAMES[@]}"; do
+        if obtain_tool "$name" "$out/bin/$name"; then
+            lines+=("$(printf '%s\t%s\t%s\t%s\t%s' "$name" "${SOURCES[$name]}" "$GOT_VERSION" \
+                "$(sha256sum "$out/bin/$name" | cut -d' ' -f1)" "$HOW")")
+        else
+            log "$name: no build for $PROFILE_NAME, skipping"
+            skipped+=("$name")
+        fi
+        # A new version that didn't build isn't locked; the old one stays.
+        if [[ $mode == resolve && $HOW != built && $HOW != cached ]]; then
+            if [[ -n ${old_lock[$name]:-} ]]; then LOCK[$name]=${old_lock[$name]}; else unset "LOCK[$name]"; fi
+        fi
+    done
+
+    {
+        echo "# tools.lock ($PROFILE_NAME): name, source, version, sha256, how (built|cached|fallback-cache|fallback-release)"
+        if (( ${#lines[@]} )); then printf '%s\n' "${lines[@]}" | sort; fi
+    } >"$out/tools.lock"
+    [[ $mode == resolve ]] && write_lock
+    log "built ${#lines[@]} tools into $out${skipped[*]:+ (skipped: ${skipped[*]})}"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

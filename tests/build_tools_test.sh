@@ -492,6 +492,231 @@ test_release_passes_tag() {
 }
 
 # ---------------------------------------------------------------------------
+# Verification, cache, fallbacks, output
+# ---------------------------------------------------------------------------
+
+# readelf_stub: readelf that reports an INTERP header when
+# $STUB_READELF_INTERP is set and GLIBC_<v> needs for $STUB_READELF_GLIBC.
+readelf_stub() {
+    cat >"$STUBS/readelf" <<'EOF'
+#!/usr/bin/env bash
+case $1 in
+    -lW) [[ -n ${STUB_READELF_INTERP:-} ]] && echo "  INTERP         0x000318 0x0000000000000318" ;;
+    -VW) for v in ${STUB_READELF_GLIBC:-}; do echo "  0x0010:   Name: GLIBC_$v  Flags: none  Version: 2"; done ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUBS/readelf"
+}
+
+# main_stubs ROWS LOCK: recipe and readelf stubs, a small tools.tsv and a
+# lock (printf format, tab-separated).
+main_stubs() {
+    recipe_stubs
+    readelf_stub
+    use_tools "$1"
+    [[ -n ${2:-} ]] && printf "$2" >"$LOCKS_DIR/x86_64-v3.lock"
+    export STUB_READELF_INTERP="" STUB_READELF_GLIBC=""
+}
+
+RG_ONLY='rg  BurntSushi/ripgrep  rg  musl|gnu  crate:ripgrep:rg'
+RG_LOCK='rg\tcrate:ripgrep:rg\t15.2.0\n'
+
+# run_main ARGS: build-tools.sh main with the stubs.
+run_main() {
+    btp "main --profile x86_64-v3 --out \"\$SANDBOX/out\" $*"
+}
+
+# cached_rg: path of rg 15.2.0 in the tool cache for the current recipe.
+cached_rg() {
+    local hash
+    hash="$(PATH="$STUBS:$PATH" "$BASH_BIN" -c "source '$BUILD_TOOLS'; load_profile x86_64-v3; load_tools; recipe_hash rg")"
+    echo "$XDG_CACHE_HOME/zsh-portable/tools/x86_64-v3/rg/15.2.0-$hash/rg"
+}
+
+test_verify_rejects_wrong_arch() {
+    main_stubs "$RG_ONLY"
+    make_elf aarch64 "$SANDBOX/bin"
+    btp "load_profile x86_64-v3; verify_binary '$SANDBOX/bin'"
+    [[ $STATUS -ne 0 ]] || fail "aarch64 binary accepted for x86_64-v3"
+    make_elf x86_64 "$SANDBOX/bin"
+    btp "load_profile x86_64-v3; verify_binary '$SANDBOX/bin'"
+    assert_eq "$STATUS" 0
+}
+
+test_verify_rejects_dynamic_for_x86_64_v3() {
+    main_stubs "$RG_ONLY"
+    make_elf x86_64 "$SANDBOX/bin"
+    STUB_READELF_INTERP=1 btp "load_profile x86_64-v3; verify_binary '$SANDBOX/bin'"
+    [[ $STATUS -ne 0 ]] || fail "dynamic binary accepted for a static profile"
+    [[ $OUTPUT == *"not static"* ]] || fail "no reason: $OUTPUT"
+    return 0
+}
+
+test_verify_rejects_glibc_above_2_39_for_qos() {
+    main_stubs "$RG_ONLY"
+    make_elf aarch64 "$SANDBOX/bin"
+    STUB_READELF_INTERP=1 STUB_READELF_GLIBC="2.17 2.39" btp "load_profile qos-orin; verify_binary '$SANDBOX/bin'"
+    assert_eq "$STATUS" 0
+    STUB_READELF_INTERP=1 STUB_READELF_GLIBC="2.17 2.41" btp "load_profile qos-orin; verify_binary '$SANDBOX/bin'"
+    [[ $STATUS -ne 0 ]] || fail "GLIBC_2.41 accepted for glibc 2.39"
+    [[ $OUTPUT == *"GLIBC_2.41"* ]] || fail "no reason: $OUTPUT"
+    return 0
+}
+
+test_built_tool_lands_in_out_and_cache() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    assert_eq "$STATUS" 0
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "no out/bin/rg: $OUTPUT"
+    [[ -x $(cached_rg) ]] || fail "not cached"
+    return 0
+}
+
+test_cache_hit_skips_build() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    : >"$STUB_LOG"
+    run_main
+    assert_eq "$STATUS" 0
+    grep -q '^cargo ' "$STUB_LOG" && fail "rebuilt despite a cache hit"
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "no out/bin/rg"
+    return 0
+}
+
+test_recipe_change_rebuilds() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    printf '%s\n' 'rg  BurntSushi/ripgrep  rg  musl|gnu  crate:ripgrep:rg:--features=pcre2' >"$TOOLS_FILE"
+    : >"$STUB_LOG"
+    run_main
+    grep -q '^cargo zigbuild.*--features=pcre2' "$STUB_LOG" || fail "changed recipe not rebuilt: $(cat "$STUB_LOG")"
+    return 0
+}
+
+# Review Focus 3: --locked with everything cached needs no network.
+test_locked_full_cache_works_offline() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    local c
+    c="$(cached_rg)"
+    mkdir -p "$(dirname "$c")"
+    make_elf x86_64 "$c"
+    STUB_CURL_FAIL=http STUB_CARGO_FAIL=1 STUB_EGET_FAIL=1 run_main --locked
+    assert_eq "$STATUS" 0
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "not taken from the cache"
+    grep -qE '^(curl|cargo|go|eget) ' "$STUB_LOG" && fail "network or build used: $(cat "$STUB_LOG")"
+    return 0
+}
+
+# Review Focus 5: a failed (or killed) build never becomes a cache entry.
+test_failed_build_never_cached() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    STUB_CARGO_FAIL=1 STUB_EGET_FAIL=1 run_main
+    [[ -e $(cached_rg) ]] && fail "failed build cached"
+    : >"$STUB_LOG"
+    run_main
+    grep -q '^cargo zigbuild' "$STUB_LOG" || fail "not rebuilt after the failure"
+    [[ -x $(cached_rg) ]] || fail "good build not cached"
+    return 0
+}
+
+test_unverified_build_never_cached() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    STUB_ELF_ARCH=aarch64 run_main
+    [[ -e $(cached_rg) ]] && fail "wrong-arch build cached"
+    return 0
+}
+
+test_failed_build_uses_newest_cached_version() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    printf 'rg\tcrate:ripgrep:rg\t15.3.0\n' >"$LOCKS_DIR/x86_64-v3.lock"
+    crate_fixture ripgrep 15.3.0
+    STUB_CARGO_FAIL=1 run_main
+    assert_eq "$STATUS" 0
+    grep -qP '^rg\tcrate:ripgrep:rg\t15.2.0\t[0-9a-f]{64}\tfallback-cache$' "$SANDBOX/out/tools.lock" ||
+        fail "tools.lock: $(cat "$SANDBOX/out/tools.lock")"
+    return 0
+}
+
+test_failed_build_without_cache_uses_release() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    STUB_CARGO_FAIL=1 run_main
+    assert_eq "$STATUS" 0
+    grep -q "^eget .*BurntSushi/ripgrep$" "$STUB_LOG" || fail "no release fallback: $(cat "$STUB_LOG")"
+    grep -q $'^rg\tcrate:ripgrep:rg\t' "$SANDBOX/out/tools.lock" || fail "not in tools.lock"
+    grep -q $'\tfallback-release$' "$SANDBOX/out/tools.lock" || fail "how: $(cat "$SANDBOX/out/tools.lock")"
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "no binary"
+    return 0
+}
+
+test_tool_with_nothing_is_reported_and_skipped() {
+    main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
+    crate_fixture ripgrep 15.2.0
+    STUB_CARGO_FAIL=1 STUB_EGET_FAIL=1 run_main
+    assert_eq "$STATUS" 0
+    [[ $OUTPUT == *"rg: no build"* ]] || fail "not reported: $OUTPUT"
+    [[ -e $SANDBOX/out/bin/rg ]] && fail "rg present"
+    [[ -x $SANDBOX/out/bin/fzf ]] || fail "fzf missing"
+    grep -q '^rg' "$SANDBOX/out/tools.lock" && fail "rg in tools.lock"
+    return 0
+}
+
+test_tools_lock_lists_sha256_and_how() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    local sum
+    sum="$(sha256sum "$SANDBOX/out/bin/rg" | cut -d' ' -f1)"
+    assert_eq "$(grep -v '^#' "$SANDBOX/out/tools.lock")" "rg	crate:ripgrep:rg	15.2.0	$sum	built"
+    run_main
+    assert_eq "$(grep -v '^#' "$SANDBOX/out/tools.lock")" "rg	crate:ripgrep:rg	15.2.0	$sum	cached"
+}
+
+test_only_limits_tools() {
+    main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
+    run_main --only fzf
+    [[ -x $SANDBOX/out/bin/fzf ]] || fail "no fzf"
+    [[ -e $SANDBOX/out/bin/rg ]] && fail "rg built"
+    return 0
+}
+
+# --resolve keeps the old lock entry for a tool that fails at the new version.
+test_resolve_keeps_old_entry_when_new_build_fails() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    fixture https://crates.io/api/v1/crates/ripgrep '{"crate":{"max_stable_version":"15.3.0"}}'
+    crate_fixture ripgrep 15.3.0
+    STUB_CARGO_FAIL=1 run_main --resolve
+    assert_eq "$STATUS" 0
+    grep -qx $'rg\tcrate:ripgrep:rg\t15.2.0' "$LOCKS_DIR/x86_64-v3.lock" || fail "lock: $(cat "$LOCKS_DIR/x86_64-v3.lock")"
+    return 0
+}
+
+test_resolve_writes_new_version_when_build_works() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    fixture https://crates.io/api/v1/crates/ripgrep '{"crate":{"max_stable_version":"15.3.0"}}'
+    crate_fixture ripgrep 15.3.0
+    run_main --resolve
+    grep -qx $'rg\tcrate:ripgrep:rg\t15.3.0' "$LOCKS_DIR/x86_64-v3.lock" || fail "lock: $(cat "$LOCKS_DIR/x86_64-v3.lock")"
+    return 0
+}
+
+test_locked_never_writes_lock() {
+    main_stubs "$TWO_TOOLS" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    fixture https://proxy.golang.org/github.com/junegunn/fzf/@latest '{"Version":"v0.66.0"}'
+    run_main --locked
+    assert_eq "$(cat "$LOCKS_DIR/x86_64-v3.lock")" "$(printf "$RG_LOCK")"
+}
+
+# ---------------------------------------------------------------------------
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
