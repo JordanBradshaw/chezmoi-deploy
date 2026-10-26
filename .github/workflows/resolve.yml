@@ -1,0 +1,54 @@
+name: resolve
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: x86_64-v3
+      deploy_ref:
+        type: string
+        default: main
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    container: ghcr.io/jordanbradshaw/zsh-builder:latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: chezmoi
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/chezmoi-deploy
+          ref: ${{ inputs.deploy_ref }}
+          path: deploy
+      - run: git config --global --add safe.directory '*'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/zsh-portable/tools
+          key: tools-${{ inputs.profile }}-${{ hashFiles(format('chezmoi/apps/locks/{0}.lock', inputs.profile)) }}
+          restore-keys: |
+            tools-${{ inputs.profile }}-
+      - name: Resolve latest versions
+        env:
+          EGET_GITHUB_TOKEN: ${{ github.token }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          cp "chezmoi/apps/locks/$PROFILE.lock" /tmp/old.lock
+          bash deploy/portable/build-tools.sh --chezmoi chezmoi --profile "$PROFILE" --resolve --out out
+          bash deploy/portable/lock-diff.sh /tmp/old.lock "chezmoi/apps/locks/$PROFILE.lock" out/tools.lock > pr-body.md
+      - name: Date
+        id: date
+        run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          path: chezmoi
+          branch: apps/rolling-${{ inputs.profile }}
+          title: 'apps: rolling update ${{ steps.date.outputs.today }}'
+          commit-message: 'apps: rolling update ${{ steps.date.outputs.today }}'
+          body-path: pr-body.md
+          add-paths: apps/locks/${{ inputs.profile }}.lock
