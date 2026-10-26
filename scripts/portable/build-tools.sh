@@ -195,6 +195,8 @@ resolve_versions() {
 # for the profile's target and CPU. SOURCE is crate:CRATE[:BIN][:ARGS], ARGS
 # comma-separated cargo arguments. Packages without a Cargo.lock build
 # unlocked. Symbols are stripped: the binaries are copied to every host.
+# RUSTUP_TOOLCHAIN overrides a crate's rust-toolchain.toml, whose extra
+# components rustup can't install into the read-only builder toolchain.
 build_crate() {
     local name=$1 source=$2 version=$3 out=$4 crate bin args work dir
     local -a extra=() locked=(--locked)
@@ -213,7 +215,7 @@ build_crate() {
     local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME"
     if (cd "$dir" && env RUSTFLAGS="-C target-cpu=$RUST_CPU" \
         CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-        CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR="$target_dir" \
+        CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR="$target_dir" RUSTUP_TOOLCHAIN=stable \
         cargo zigbuild --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
         && install -D -m755 "$target_dir/$(rust_target_dir)/release/$bin" "$out"; then
         rm -rf "$work"
@@ -329,8 +331,11 @@ obtain_tool() {
             mkdir -p "$CACHE_ROOT/tmp"
             tmp="$(mktemp -d "$CACHE_ROOT/tmp/build.XXXXXX")"
             log "building $name $version for $PROFILE_NAME"
+            # Release binaries are used as published (fetch_release checked
+            # the arch); the static/glibc checks are for binaries built here.
             if build_recipe "$name" "${SOURCES[$name]}" "${REPOS[$name]}" "${FILES[$name]}" \
-                "${SPECS[$name]}" "$version" "$tmp/$name" && verify_binary "$tmp/$name"; then
+                "${SPECS[$name]}" "$version" "$tmp/$name" &&
+                { [[ ${SOURCES[$name]} == release ]] || verify_binary "$tmp/$name"; }; then
                 mkdir -p "$(dirname "$cached")"
                 mv -f "$tmp/$name" "$cached"
                 HOW=built
