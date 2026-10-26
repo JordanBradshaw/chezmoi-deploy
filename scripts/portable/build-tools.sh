@@ -83,14 +83,27 @@ load_tools() {
     done <"$TOOLS_FILE"
 }
 
-# http_get URL: the body of URL; GitHub API calls carry the token if any.
+# http_get URL: print the body of URL. Fails with 4 for a 404 (e.g. a repo
+# without releases), 1 for anything else. GitHub API calls carry the token
+# if there is one, read from a pipe so it stays off curl's command line.
 http_get() {
-    local -a auth=()
+    local tmp code="" tok=""
+    tmp="$(mktemp)"
     if [[ $1 == https://api.github.com/* ]]; then
         load_github_token
-        [[ -n ${EGET_GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer $EGET_GITHUB_TOKEN")
+        tok=${EGET_GITHUB_TOKEN:-}
     fi
-    curl -fsSL --max-time 30 -A zsh-config-build-tools "${auth[@]}" "$1"
+    local -a args=(-sSL --max-time 30 -A zsh-config-build-tools -o "$tmp" -w '%{http_code}')
+    if [[ -n $tok ]]; then
+        code="$(curl "${args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$tok") "$1")" || code=000
+    else
+        code="$(curl "${args[@]}" "$1")" || code=000
+    fi
+    case $code in
+        200) cat "$tmp"; rm -f "$tmp"; return 0 ;;
+        404) rm -f "$tmp"; return 4 ;;
+        *) rm -f "$tmp"; return 1 ;;
+    esac
 }
 
 # json_get KEY...: the value at the KEY path of the JSON document on stdin.
@@ -122,9 +135,15 @@ latest_version() {
             # Without v-prefixed semver tags the proxy only has pseudo-versions
             # of the default branch; the GitHub release tag is the release
             # (go install accepts a plain tag name).
-            if [[ $version =~ -[0-9]{14}-[0-9a-f]{12}$ && $repo == */* ]] &&
-                body="$(http_get "https://api.github.com/repos/$repo/releases/latest")"; then
-                json_get tag_name <<<"$body" && return 0
+            # Only "no releases" (404) keeps the pseudo-version; any other
+            # failure fails the lookup, so --resolve keeps the old entry.
+            if [[ $version =~ -[0-9]{14}-[0-9a-f]{12}$ && $repo == */* ]]; then
+                if body="$(http_get "https://api.github.com/repos/$repo/releases/latest")"; then
+                    json_get tag_name <<<"$body"
+                    return
+                elif [[ $? -ne 4 ]]; then
+                    return 1
+                fi
             fi
             echo "$version"
             ;;
@@ -139,12 +158,23 @@ latest_version() {
     esac
 }
 
+# version_origin SOURCE: what a locked version refers to: the crate, the Go
+# module or the source kind, without build arguments or binary names.
+version_origin() {
+    case $1 in
+        crate:*) local c; IFS=: read -r _ c _ <<<"$1"; echo "crate:$c" ;;
+        go:*) local m=${1#go:}; echo "go:${m%%//*}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # lock_file: the profile's lock.
 lock_file() {
     echo "$LOCKS_DIR/$PROFILE_NAME.lock"
 }
 
-# read_lock: LOCK from the profile's lock, if there is one.
+# read_lock: LOCK from the profile's lock, if there is one (after load_tools,
+# so entries whose source no longer matches tools.tsv are dropped).
 read_lock() {
     local name source version file
     file="$(lock_file)"
@@ -152,6 +182,9 @@ read_lock() {
     [[ -r $file ]] || return 0
     while IFS=$'\t' read -r name source version; do
         [[ -z $name || $name == \#* ]] && continue
+        # Locked for another origin (the tsv row changed from crate to
+        # release, another crate, ...): look it up again.
+        [[ -n ${SOURCES[$name]:-} && $(version_origin "${SOURCES[$name]}") != "$(version_origin "$source")" ]] && continue
         LOCK[$name]=$version
     done <"$file"
 }
@@ -177,7 +210,7 @@ write_lock() {
 # tool, keeping the old entry when a lookup fails.
 resolve_versions() {
     local mode=$1 name version
-    [[ ${#NAMES[@]} -gt 0 ]] || load_tools
+    [[ ${#SOURCES[@]} -gt 0 ]] || load_tools
     read_lock
     for name in "${NAMES[@]}"; do
         [[ $mode == locked && -n ${LOCK[$name]:-} ]] && continue
@@ -213,7 +246,7 @@ build_crate() {
     dir="$work/$crate-$version"
     [[ -f $dir/Cargo.lock ]] || locked=()
     local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME"
-    if (cd "$dir" && env RUSTFLAGS="-C target-cpu=$RUST_CPU" \
+    if (cd "$dir" && env -u EGET_GITHUB_TOKEN RUSTFLAGS="-C target-cpu=$RUST_CPU" \
         CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
         CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR="$target_dir" RUSTUP_TOOLCHAIN=stable \
         cargo zigbuild --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
@@ -239,7 +272,7 @@ build_go() {
     for v in "${goenv[@]}"; do [[ $v == GOARCH=* ]] && goarch=${v#GOARCH=}; done
     mkdir -p "$CACHE_ROOT/tmp"
     gopath="$(mktemp -d "$CACHE_ROOT/tmp/go.XXXXXX")"
-    if env GOPATH="$gopath" GOMODCACHE="$CACHE_ROOT/gomod" GOCACHE="$CACHE_ROOT/gobuild" \
+    if env -u EGET_GITHUB_TOKEN GOPATH="$gopath" GOMODCACHE="$CACHE_ROOT/gomod" GOCACHE="$CACHE_ROOT/gobuild" \
         GOFLAGS=-modcacherw GOOS=linux "${goenv[@]}" \
         go install -trimpath "-ldflags=-s -w" "$pkg@$version" >&2; then
         # Cross builds land in bin/linux_GOARCH.
@@ -257,7 +290,9 @@ build_go() {
 }
 
 # build_recipe NAME SOURCE REPO FILE SPEC VERSION OUT: make NAME's binary at
-# OUT from its source at VERSION (see the header).
+# OUT from its source at VERSION (see the header). Builds run without the
+# GitHub token: build scripts and proc-macros of every dependency would see
+# it.
 build_recipe() {
     local name=$1 source=$2 repo=$3 file=$4 spec=$5 version=$6 out=$7
     rm -f "$out"
@@ -270,7 +305,7 @@ build_recipe() {
                 log "$name: $source needs the Yocto SDK (profile $PROFILE_NAME has none)"
                 return 1
             fi
-            "$CROSS_DIR/${source#cross:}.sh" "$PROFILE_ARCH" "$out" </dev/null >&2
+            env -u EGET_GITHUB_TOKEN "$CROSS_DIR/${source#cross:}.sh" "$PROFILE_ARCH" "$out" </dev/null >&2
             ;;
         release) fetch_release "$name" "$repo" "$file" "$spec" "$PROFILE_ARCH" "$out" "$version" ;;
         *) log "$name: unknown source $source"; return 1 ;;
@@ -302,12 +337,17 @@ verify_binary() {
 # Build settings applied by build_crate/build_go; part of every cache key.
 BUILD_SETTINGS="cargo: lto=fat codegen-units=1 strip=symbols; go: -trimpath -ldflags=-s -w"
 
-# recipe_hash NAME: short hash of NAME's tools.tsv row, the profile and
-# BUILD_SETTINGS, so a changed recipe never reuses an old build.
+# recipe_hash NAME: short hash of NAME's tools.tsv row, the profile,
+# BUILD_SETTINGS and (cross recipes) the recipe scripts, so a changed recipe
+# never reuses an old build.
 recipe_hash() {
     {
         printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}" "$BUILD_SETTINGS"
         cat "$PROFILES_DIR/$PROFILE_NAME.env"
+        # A cross recipe's version lives in its script (and the SDK helpers).
+        if [[ ${SOURCES[$1]} == cross:* ]]; then
+            cat "$CROSS_DIR/${SOURCES[$1]#cross:}.sh" "$CROSS_DIR/lib.sh" "$CROSS_DIR/sdk.sh" 2>/dev/null || true
+        fi
     } | sha256sum | cut -c1-12
 }
 
@@ -395,13 +435,20 @@ main() {
     for name in "${!LOCK[@]}"; do old_lock[$name]=${LOCK[$name]}; done
     resolve_versions "$mode"
 
-    rm -rf "$out/bin"
-    mkdir -p "$out/bin"
+    # DIR/bin is replaced as a whole at the end, and only if it is ours.
+    if [[ -e $out/bin && ! -f $out/tools.lock ]]; then
+        die "refusing to replace $out/bin: not a build-tools output (no tools.lock)"
+    fi
+    mkdir -p "$out"
+    rm -rf "$out"/.staging.*
+    local stage
+    stage="$(mktemp -d "$out/.staging.XXXXXX")"
+    mkdir "$stage/bin"
     local -a lines=() skipped=()
     for name in "${NAMES[@]}"; do
-        if obtain_tool "$name" "$out/bin/$name"; then
+        if obtain_tool "$name" "$stage/bin/$name"; then
             lines+=("$(printf '%s\t%s\t%s\t%s\t%s' "$name" "${SOURCES[$name]}" "$GOT_VERSION" \
-                "$(sha256sum "$out/bin/$name" | cut -d' ' -f1)" "$HOW")")
+                "$(sha256sum "$stage/bin/$name" | cut -d' ' -f1)" "$HOW")")
         else
             log "$name: no build for $PROFILE_NAME, skipping"
             skipped+=("$name")
@@ -415,7 +462,11 @@ main() {
     {
         echo "# tools.lock ($PROFILE_NAME): name, source, version, sha256, how (built|cached|fallback-cache|fallback-release)"
         if (( ${#lines[@]} )); then printf '%s\n' "${lines[@]}" | sort; fi
-    } >"$out/tools.lock"
+    } >"$stage/tools.lock"
+    rm -rf "$out/bin"
+    mv "$stage/bin" "$out/bin"
+    mv -f "$stage/tools.lock" "$out/tools.lock"
+    rmdir "$stage"
     [[ $mode == resolve ]] && write_lock
     log "built ${#lines[@]} tools into $out${skipped[*]:+ (skipped: ${skipped[*]})}"
 }
