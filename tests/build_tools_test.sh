@@ -19,7 +19,7 @@ FAIL=0
 setup() {
     SANDBOX="$(mktemp -d)"
     export SANDBOX
-    unset TOOLS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL \
+    unset TOOLS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
         STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF
     OUTPUT=""
     STATUS=0
@@ -167,14 +167,27 @@ stubs_setup() {
     STUB_LOG="$SANDBOX/calls.log"
     mkdir -p "$STUBS" "$SANDBOX/fixtures"
     : >"$STUB_LOG"
+    # Like curl: -o FILE and -w '%{http_code}' are honoured; a URL with a
+    # word of $STUB_CURL_FAIL answers 500, one without a fixture 404 (both
+    # exit 22 without -w). Full arguments go to $SANDBOX/curl-args.log.
     cat >"$STUBS/curl" <<'EOF'
 #!/usr/bin/env bash
-url="${@: -1}"
+url="${@: -1}" out="" code=""
 echo "curl $url" >>"$STUB_LOG"
-for bad in ${STUB_CURL_FAIL:-}; do [[ $url == *"$bad"* ]] && exit 22; done
+echo "$*" >>"$SANDBOX/curl-args.log"
+for ((i = 1; i < $#; i++)); do
+    j=$((i + 1))
+    case ${!i} in -o) out=${!j} ;; -w) code=1 ;; esac
+done
+status=200
 f="$FIXTURES/$(printf '%s' "$url" | tr '/:' '__')"
-[[ -f $f ]] || exit 22
-cat "$f"
+[[ -f $f ]] || status=404
+for bad in ${STUB_CURL_FAIL:-}; do [[ $url == *"$bad"* ]] && status=500; done
+if [[ $status == 200 ]]; then
+    if [[ -n $out ]]; then cat "$f" >"$out"; else cat "$f"; fi
+fi
+[[ -n $code ]] && { printf '%s' "$status"; exit 0; }
+[[ $status == 200 ]] || exit 22
 EOF
     chmod +x "$STUBS/curl"
     export STUB_LOG FIXTURES="$SANDBOX/fixtures" STUB_CURL_FAIL=""
@@ -859,6 +872,103 @@ test_e2e_x86_64_v3_builds_rg_and_fzf() {
         "$out/bin/$t" --version >/dev/null 2>&1 || fail "$t: doesn't run"
         grep -qP "^$t\t.*\t(built|cached)$" "$out/tools.lock" || fail "$t: tools.lock: $(cat "$out/tools.lock")"
     done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Final review fixes
+# ---------------------------------------------------------------------------
+
+# Important 1: the GitHub token never reaches build scripts (cargo build.rs,
+# proc-macros, go, cross recipes), only curl and eget.
+test_token_not_exported_to_builds() {
+    main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
+    crate_fixture ripgrep 15.2.0
+    sed -i '2a echo "cargo-token=${EGET_GITHUB_TOKEN:-}" >>"$STUB_LOG"' "$STUBS/cargo"
+    sed -i '2a echo "go-token=${EGET_GITHUB_TOKEN:-}" >>"$STUB_LOG"' "$STUBS/go"
+    EGET_GITHUB_TOKEN=s3cret run_main
+    grep -qx "cargo-token=" "$STUB_LOG" || fail "cargo saw the token: $(grep token "$STUB_LOG")"
+    grep -qx "go-token=" "$STUB_LOG" || fail "go saw the token: $(grep token "$STUB_LOG")"
+    return 0
+}
+
+# Minor 1 (regraded): the token isn't on curl's command line.
+test_token_not_on_curl_command_line() {
+    stubs_setup
+    fixture https://api.github.com/repos/tstack/lnav/releases/latest '{"tag_name":"v0.14.1"}'
+    EGET_GITHUB_TOKEN=s3cret btp 'latest_version release tstack/lnav'
+    assert_eq "$OUTPUT" "v0.14.1"
+    grep -q s3cret "$SANDBOX/curl-args.log" && fail "token in curl args: $(cat "$SANDBOX/curl-args.log")"
+    return 0
+}
+
+# Important 2: a lock entry written for another recipe is looked up again.
+test_lock_entry_for_other_source_is_resolved() {
+    stubs_setup
+    use_tools 'zellij  zellij-org/zellij  zellij  musl  release'
+    printf 'zellij\tcrate:zellij\t0.43.1\n' >"$LOCKS_DIR/x86_64-v3.lock"
+    fixture https://api.github.com/repos/zellij-org/zellij/releases/latest '{"tag_name":"v0.45.1"}'
+    btp 'load_profile x86_64-v3; resolve_versions locked; echo "${LOCK[zellij]}"'
+    assert_eq "$OUTPUT" "v0.45.1"
+}
+
+# Important 3: a GitHub failure (not "no releases") fails the go lookup, so
+# --resolve keeps the old entry instead of locking a pseudo-version.
+test_go_pseudo_version_github_failure_fails_lookup() {
+    stubs_setup
+    fixture https://proxy.golang.org/github.com/!lifailon/lazyjournal/@latest '{"Version":"v0.0.0-20261026112250-ca677bc44ea2"}'
+    STUB_CURL_FAIL=api.github.com btp 'latest_version go:github.com/Lifailon/lazyjournal Lifailon/lazyjournal'
+    [[ $STATUS -ne 0 ]] || fail "lookup succeeded with: $OUTPUT"
+    return 0
+}
+
+# Important 4: cross recipes' scripts are part of their cache key.
+test_cross_script_in_recipe_hash() {
+    main_stubs 'tmux  cross:tmux  tmux  -  cross:tmux'
+    printf 'TMUX_VERSION=3.5a\n' >"$CROSS_DIR/tmux.sh"
+    btp 'load_profile qos-orin; load_tools; recipe_hash tmux'
+    local a=$OUTPUT
+    printf 'TMUX_VERSION=3.6\n' >"$CROSS_DIR/tmux.sh"
+    btp 'load_profile qos-orin; load_tools; recipe_hash tmux'
+    [[ -n $a && $a != "$OUTPUT" ]] || fail "hash unchanged: $a"
+    return 0
+}
+
+# Important 5: --out never deletes a bin/ that build-tools didn't make.
+test_out_with_foreign_bin_is_refused() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    mkdir -p "$SANDBOX/out/bin"
+    printf 'mine\n' >"$SANDBOX/out/bin/chezmoi"
+    run_main
+    [[ $STATUS -ne 0 ]] || fail "accepted a foreign bin/"
+    [[ -f $SANDBOX/out/bin/chezmoi ]] || fail "deleted a foreign file"
+    [[ $OUTPUT == *"not a build-tools output"* ]] || fail "no reason: $OUTPUT"
+    return 0
+}
+
+# Important 5: bin/ and tools.lock change together, at the end of the run.
+test_out_replaced_only_when_done() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    local before
+    before="$(cat "$SANDBOX/out/tools.lock")"
+    # A run that dies mid-way (here: lock unreadable after the tools are
+    # chosen) leaves the previous output alone.
+    sed -i '2a [[ -n ${STUB_DIE:-} ]] && kill -9 $PPID' "$STUBS/eget"
+    printf '%s\n' 'lnav  tstack/lnav  lnav  musl  release' >"$TOOLS_FILE"
+    printf 'lnav\trelease\tv1\n' >"$LOCKS_DIR/x86_64-v3.lock"
+    STUB_DIE=1 run_main
+    assert_eq "$(cat "$SANDBOX/out/tools.lock")" "$before"
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "previous bin/ wiped by a run that didn't finish"
+    [[ -e $SANDBOX/out/bin/lnav ]] && fail "half-filled bin/ published"
+    return 0
+}
+
+# Minor 9 (plan requirement): login shells keep the toolchains on PATH.
+test_feature_adds_profile_d() {
+    grep -q '/etc/profile.d/zsh-builder.sh' "$FEATURE_DIR/install.sh" || fail "no /etc/profile.d/zsh-builder.sh"
     return 0
 }
 

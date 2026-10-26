@@ -66,6 +66,13 @@ tmp="$(mktemp -d)"
 install -m755 "$tmp/eget" /usr/local/bin/eget
 rm -rf "$tmp"
 
+# Login shells (whose /etc/profile resets PATH on Debian) and plain docker
+# exec sessions get the toolchains too.
+cat >/etc/profile.d/zsh-builder.sh <<'EOF'
+export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+export PATH="/usr/local/cargo/bin:/usr/local/go/bin:/usr/local/zig:$PATH"
+EOF
+
 # Builds run as the invoking user, with their own CARGO_HOME for the
 # registry; the toolchains only need to be readable.
 chmod -R a+rX /usr/local/cargo /usr/local/rustup /usr/local/go /usr/local/zig
