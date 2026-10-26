@@ -1,0 +1,23 @@
+name: features
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'features/src/**'
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: devcontainers/action@v1
+        with:
+          publish-features: true
+          base-path-to-features: ./features/src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

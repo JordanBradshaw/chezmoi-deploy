@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 5 * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y zsh tmux python3 binutils
+      - name: Install chezmoi and eget
+        run: |
+          mkdir -p ~/.local/bin
+          sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
+          (cd /tmp && curl -fsSL https://zyedidia.github.io/eget.sh | sh && mv /tmp/eget ~/.local/bin/)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/chezmoi
+          ref: main
+          path: chezmoi
+      - name: build_tools_test
+        run: CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" bash tests/build_tools_test.sh
+      - name: portable_test
+        run: CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" bash tests/portable_test.sh
+      - name: lock_diff_test
+        run: bash tests/lock_diff_test.sh
