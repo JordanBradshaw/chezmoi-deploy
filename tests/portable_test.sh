@@ -324,14 +324,19 @@ test_tree_hash_handles_directory_symlinks() {
 # Cross-built tools
 # ---------------------------------------------------------------------------
 
-# fake_cross_env: a tools.tsv with only cross: rows and a cross script that
-# writes an aarch64 ELF, or fails for other arches.
+# fake_cross_env: a manifest with one cross: row and one bundle=- row, and a
+# cross script that writes an aarch64 ELF, or fails for other arches.
 fake_cross_env() {
     SCRIPT_DIR="$SANDBOX/portable"
     CACHE="$SANDBOX/cache"
     REFRESH=""
     mkdir -p "$SCRIPT_DIR/cross"
-    printf 'fake  cross:fake  fake  -\n' >"$SCRIPT_DIR/tools.tsv"
+    APPS_FILE="$SANDBOX/apps.tsv"
+    {
+        echo '# name tier bundle apt pacman dnf brew release file assets build'
+        echo 'fake extra y - - - - - fake - cross:fake'
+        echo 'other core - - - - - o/o other - -'
+    } >"$APPS_FILE"
     {
         echo '#!/usr/bin/env bash'
         echo "echo \"cross \$*\" >>\"$STUB_LOG\""
@@ -347,6 +352,14 @@ test_fetch_tools_runs_cross_script() {
     OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" 2>&1)"
     assert_call_matches "^cross aarch64 $CACHE/tools/aarch64/fake$"
     assert_eq "$(elf_arch "$SANDBOX/bin/fake")" aarch64
+}
+
+test_fetch_tools_uses_manifest() {
+    fake_cross_env
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" 2>&1)"
+    assert_eq "$(grep -c '^cross' "$STUB_LOG")" 1
+    [[ ! -e $SANDBOX/bin/other ]] || fail "bundle=- row fetched"
+    [[ ! -e $CACHE/tools/aarch64/other ]] || fail "bundle=- row touched"
 }
 
 test_fetch_tools_reuses_cross_build() {
@@ -473,20 +486,124 @@ test_git_externals_matches_whole_path_components() {
 # Rebuild stamp
 # ---------------------------------------------------------------------------
 
+# mkrepos: CHEZMOI and DEPLOY as two committed git repos.
+mkrepos() {
+    CHEZ="$SANDBOX/chez"
+    DEP="$SANDBOX/dep"
+    mkdir -p "$CHEZ/home" "$CHEZ/apps" "$CHEZ/scripts" "$DEP/portable"
+    echo a >"$CHEZ/home/a"
+    echo b >"$CHEZ/home/b"
+    echo m >"$CHEZ/apps/apps.tsv"
+    echo s >"$CHEZ/scripts/s"
+    cp "$REPO_DIR/apps/lib.sh" "$CHEZ/apps/lib.sh"
+    echo p >"$DEP/portable/p"
+    local r
+    for r in "$CHEZ" "$DEP"; do
+        git -C "$r" init -q
+        git -C "$r" add . && git -C "$r" -c user.email=t@t -c user.name=t commit -qm init
+    done
+}
+
 # A tracked file deleted in the working tree (not yet committed) must not
 # break the stamp, and must change it.
 test_input_stamp_handles_deleted_tracked_files() {
-    local repo="$SANDBOX/repo" before after
-    mkdir -p "$repo/home" "$repo/portable"
-    git -C "$repo" init -q
-    echo a >"$repo/home/a"
-    echo b >"$repo/home/b"
-    git -C "$repo" add . && git -C "$repo" -c user.email=t@t -c user.name=t commit -qm init
-    before="$(input_stamp "$repo" x86_64 2>"$SANDBOX/err")"
-    rm "$repo/home/b"
-    after="$(input_stamp "$repo" x86_64 2>"$SANDBOX/err")"
+    mkrepos
+    local before after
+    before="$(input_stamp "$CHEZ" "$DEP" x86_64 2>"$SANDBOX/err")"
+    rm "$CHEZ/home/b"
+    after="$(input_stamp "$CHEZ" "$DEP" x86_64 2>"$SANDBOX/err")"
     assert_eq "$(cat "$SANDBOX/err")" ""
     [[ -n $after && $after != "$before" ]] || fail "stamp unchanged after delete"
+    return 0
+}
+
+test_input_stamp_sees_both_sides() {
+    mkrepos
+    local base
+    base="$(input_stamp "$CHEZ" "$DEP" x86_64)"
+    echo x >"$CHEZ/scripts/s"
+    assert_eq "$(input_stamp "$CHEZ" "$DEP" x86_64)" "$base"
+    echo x >"$CHEZ/apps/apps.tsv"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$base" ]] || fail "chezmoi apps/ ignored"
+    echo m >"$CHEZ/apps/apps.tsv"
+    echo x >"$DEP/portable/p"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$base" ]] || fail "deploy portable/ ignored"
+    return 0
+}
+
+test_build_info_lines() {
+    mkrepos
+    local csha dsha
+    csha="$(git -C "$CHEZ" rev-parse --short HEAD)"
+    dsha="$(git -C "$DEP" rev-parse --short HEAD)"
+    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64)"
+    assert_eq "$(sed -n 1p <<<"$OUTPUT")" "chezmoi $csha"
+    assert_eq "$(sed -n 2p <<<"$OUTPUT")" "deploy $dsha"
+    assert_eq "$(sed -n 3p <<<"$OUTPUT")" "arch aarch64"
+    grep -qE '^built [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$(sed -n 4p <<<"$OUTPUT")" \
+        || fail "bad built line"
+    assert_eq "$(wc -l <<<"$OUTPUT")" 4
+    echo x >"$CHEZ/home/a"
+    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64)"
+    assert_eq "$(sed -n 1p <<<"$OUTPUT")" "chezmoi $csha-dirty"
+    assert_eq "$(sed -n 2p <<<"$OUTPUT")" "deploy $dsha"
+    OUTPUT="$(build_info "$SANDBOX" "$SANDBOX" aarch64)"
+    assert_eq "$(sed -n 1,2p <<<"$OUTPUT" | tr '\n' ' ')" "chezmoi unknown deploy unknown "
+}
+
+test_buildinfo_not_in_version() {
+    # Directly in main: BUILDINFO is written after VERSION is computed, and
+    # two builds of the same content get the same version.
+    mkrepos
+    (
+        export XDG_CACHE_HOME="$SANDBOX/cache" HOME="$SANDBOX/home"
+        mkdir -p "$HOME" "$SANDBOX/noyupps"
+        fetch_zsh() { mkdir -p "$2"; echo z >"$2/zsh"; }
+        fetch_tools() { mkdir -p "$2"; echo t >"$2/tool"; }
+        fetch_plugins() { mkdir -p "$3"; echo p >"$3/p"; }
+        fetch_git_externals() { :; }
+        export_dotfiles() { mkdir -p "$1/.config/zsh"; echo plug >"$1/.config/zsh/.zsh_plugins.txt"; }
+        check_secrets() { return 0; }
+        yupps_dir() { echo "$SANDBOX/noyupps"; }
+        main --arch x86_64 --force --chezmoi "$CHEZ" --out "$SANDBOX/o1" >/dev/null || exit 1
+        sleep 1
+        main --arch x86_64 --force --chezmoi "$CHEZ" --out "$SANDBOX/o2" >/dev/null 2>&1 || exit 1
+    )
+    assert_eq "$?" 0
+    assert_eq "$(cat "$SANDBOX/o1/zsh-portable-x86_64.version")" "$(cat "$SANDBOX/o2/zsh-portable-x86_64.version")"
+    local i1 i2
+    i1="$(tar -xOzf "$SANDBOX/o1/zsh-portable-x86_64.tar.gz" ./BUILDINFO)"
+    i2="$(tar -xOzf "$SANDBOX/o2/zsh-portable-x86_64.tar.gz" ./BUILDINFO)"
+    [[ -n $i1 && $i1 != "$i2" ]] || fail "built lines should differ"
+    assert_eq "$(grep -v '^built' <<<"$i1")" "$(grep -v '^built' <<<"$i2")"
+    assert_eq "$(tar -xOzf "$SANDBOX/o1/zsh-portable-x86_64.tar.gz" ./VERSION)" "$(cat "$SANDBOX/o1/zsh-portable-x86_64.version")"
+    # The packed VERSION is a hash of the tree without BUILDINFO.
+    mkdir -p "$SANDBOX/unpacked"
+    tar -xzf "$SANDBOX/o1/zsh-portable-x86_64.tar.gz" -C "$SANDBOX/unpacked"
+    rm "$SANDBOX/unpacked/BUILDINFO" "$SANDBOX/unpacked/VERSION"
+    assert_eq "$(tree_hash "$SANDBOX/unpacked")" "$(cat "$SANDBOX/o1/zsh-portable-x86_64.version")"
+}
+
+# Run directly: --chezmoi beats a bad default tree, --help needs none.
+test_direct_run_resolves_after_flags() {
+    mkdir -p "$SANDBOX/bad" "$SANDBOX/good/apps" "$SANDBOX/bin"
+    git init -q "$SANDBOX/bad"
+    : >"$SANDBOX/good/apps/apps.tsv"
+    cp "$REPO_DIR/apps/lib.sh" "$SANDBOX/good/apps/lib.sh"
+    printf '#!/bin/sh\necho "%s"\n' "$SANDBOX/bad" >"$SANDBOX/bin/chezmoi"
+    chmod +x "$SANDBOX/bin/chezmoi"
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/bin:$PATH" bash "$BUILD" --help 2>&1)"
+    STATUS=$?
+    assert_status 0
+    assert_output_matches "--chezmoi DIR"
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/bin:$PATH" bash "$BUILD" 2>&1)"
+    STATUS=$?
+    assert_status 2
+    grep -q "no apps/apps.tsv" <<<"$OUTPUT" && fail "resolved before usage check"
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/bin:$PATH" bash "$BUILD" --arch x86_64 2>&1)"
+    assert_output_matches "no apps/apps.tsv in "
+    OUTPUT="$(env -u CHEZMOI_SRC PATH="$SANDBOX/bin:$PATH" bash "$BUILD" --arch x86_64 --chezmoi "$SANDBOX/good" 2>&1)"
+    grep -q "no apps/apps.tsv" <<<"$OUTPUT" && fail "--chezmoi ignored"
     return 0
 }
 
@@ -504,16 +621,15 @@ test_yupps_dir_env_override() {
 }
 
 test_input_stamp_follows_yupps_dir() {
-    local repo="$SANDBOX/repo" dev="$SANDBOX/dev" a b
-    mkdir -p "$repo/home" "$dev/conf.d"
-    git -C "$repo" init -q
-    echo a >"$repo/home/a"
+    local dev="$SANDBOX/dev" a b
+    mkrepos
+    mkdir -p "$dev/conf.d"
     echo 1 >"$dev/conf.d/x.zsh"
-    a="$(input_stamp "$repo" x86_64 "$dev")"
+    a="$(input_stamp "$CHEZ" "$DEP" x86_64 "$dev")"
     echo 2 >"$dev/conf.d/x.zsh"
-    b="$(input_stamp "$repo" x86_64 "$dev")"
+    b="$(input_stamp "$CHEZ" "$DEP" x86_64 "$dev")"
     [[ $a != "$b" ]] || fail "stamp ignores the yupps-zsh dir"
-    [[ $(input_stamp "$repo" x86_64) != "$b" ]] || fail "stamp same without yupps-zsh dir"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$b" ]] || fail "stamp same without yupps-zsh dir"
     return 0
 }
 

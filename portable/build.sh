@@ -2,7 +2,7 @@
 #
 # Build a self-contained zsh bundle for another machine.
 #
-# Usage: build.sh --arch ARCH [--force] [--refresh] [--out DIR]
+# Usage: build.sh --arch ARCH [--chezmoi DIR] [--force] [--refresh] [--out DIR]
 #
 #   ARCH is the target's `uname -m` (aarch64, arm64, armv7l, x86_64).
 #   Prints the path of the bundle (zsh-portable-ARCH.tar.gz) on the last line
@@ -10,9 +10,15 @@
 #   bundle's content hash, which zssh compares with the remote copy.
 #
 #   The bundle holds a static zsh (romkatv/zsh-bin), the zsh dotfiles from
-#   this repo, antidote with every plugin already cloned, and the tools in
-#   tools.tsv built for ARCH. Nothing is fetched on the target, so it works
-#   on hosts without internet.
+#   the chezmoi tree, antidote with every plugin already cloned, and the
+#   bundle=y tools of its apps/apps.tsv built for ARCH. Nothing is fetched on
+#   the target, so it works on hosts without internet.
+#
+#   The chezmoi tree (home/, apps/) is --chezmoi DIR, else $CHEZMOI_SRC, else
+#   the top level of `chezmoi source-path`. portable/ belongs to this repo.
+#   BUILDINFO in the bundle records the chezmoi and deploy commits (-dirty
+#   when their inputs have uncommitted changes), the arch and the build
+#   time. It is not part of the version hash.
 #
 #   Secrets never go in: chezmoi runs with a throwaway config and
 #   --exclude=encrypted, only allowlisted paths are exported, and the
@@ -20,9 +26,9 @@
 #   every value from ~/.config/secrets/env before it is packed.
 #
 #   The bundle is rebuilt only when tracked or untracked files under home/ or
-#   portable/ change, or the yupps-zsh plugin it ships does (this
-#   machine's ~/.config/zsh/plugins/yupps-zsh, or $ZSSH_YUPPS_DIR). --force
-#   rebuilds anyway; --refresh also re-downloads zsh, tools and plugins.
+#   apps/ (chezmoi tree) or portable/ (this repo) change, or the yupps-zsh
+#   plugin it ships does (this machine's ~/.config/zsh/plugins/yupps-zsh, or
+#   $ZSSH_YUPPS_DIR). --force rebuilds anyway; --refresh also re-downloads zsh, tools and plugins.
 #
 #   Caches live in ${XDG_CACHE_HOME:-~/.cache}/zsh-portable.
 
@@ -58,7 +64,11 @@ die() { echo "build: error: $*" >&2; exit 1; }
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-resolve_chezmoi_src || return 1 2>/dev/null || exit 1
+# Sourced (tests): resolve now. Run directly: main resolves after the flags,
+# so --chezmoi beats a bad default and --help needs no tree.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    resolve_chezmoi_src || return 1
+fi
 
 # git_externals TOML PATH...: print "path<TAB>url<TAB>clone args" for every
 # git-repo external in a rendered .chezmoiexternal.toml that lies in one of
@@ -142,23 +152,48 @@ check_secrets() {
     return "$found"
 }
 
-# input_stamp REPO ARCH [YUPPS_DIR]: hash of everything that affects the
-# bundle, including the yupps-zsh plugin it ships.
+# input_stamp CHEZMOI DEPLOY ARCH [YUPPS_DIR]: hash of everything that
+# affects the bundle, including the yupps-zsh plugin it ships.
 input_stamp() {
-    local repo=$1 arch=$2 dev=${3:-} f
+    local chezmoi=$1 deploy=$2 arch=$3 dev=${4:-} f
     local -a present=()
     {
         echo "$arch $ZSH_BIN_TAG"
         # Tracked files deleted in the working tree count by name only.
         while IFS= read -r -d '' f; do
-            if [[ -f $repo/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
-        done < <(cd "$repo" && git ls-files -z -co --exclude-standard -- home portable | sort -zu)
-        (( ${#present[@]} == 0 )) || (cd "$repo" && sha256sum -- "${present[@]}")
+            if [[ -f $chezmoi/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
+        done < <(cd "$chezmoi" && git ls-files -z -co --exclude-standard -- home apps | sort -zu)
+        (( ${#present[@]} == 0 )) || (cd "$chezmoi" && sha256sum -- "${present[@]}")
+        present=()
+        while IFS= read -r -d '' f; do
+            if [[ -f $deploy/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
+        done < <(cd "$deploy" && git ls-files -z -co --exclude-standard -- portable | sort -zu)
+        (( ${#present[@]} == 0 )) || (cd "$deploy" && sha256sum -- "${present[@]}")
         if [[ -n $dev ]]; then
             echo "yupps $dev"
             (cd "$dev" && find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 -r sha256sum)
         fi
     } | sha256sum | cut -d' ' -f1
+}
+
+# repo_rev DIR PATH...: short HEAD of DIR's repo, "-dirty" if PATHs have
+# uncommitted changes, "unknown" outside a git repo.
+repo_rev() {
+    local dir=$1 sha
+    shift
+    sha="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)" || { echo unknown; return 0; }
+    if [[ -n $(git -C "$dir" status --porcelain -- "$@" 2>/dev/null) ]]; then
+        sha+=-dirty
+    fi
+    echo "$sha"
+}
+
+# build_info CHEZMOI DEPLOY ARCH: the BUILDINFO text.
+build_info() {
+    echo "chezmoi $(repo_rev "$1" home apps)"
+    echo "deploy $(repo_rev "$2" portable)"
+    echo "arch $3"
+    echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 # tree_hash DIR: content hash of a directory, used as the bundle version.
@@ -206,44 +241,47 @@ fetch_zsh() {
 
 fetch_tools() {
     local arch=$1 dest=$2
-    local dir="$CACHE/tools/$arch" name repo file spec source
+    local dir="$CACHE/tools/$arch" name release build
     mkdir -p "$dir" "$dest"
+    apps_load || die "could not read the app manifest"
 
-    while read -r name repo file spec source; do
-        [[ -z $name || $name == \#* ]] && continue
+    for name in $(apps_names --bundle); do
+        build="$(app "$name" build)"
+        release="$(app "$name" release)"
         if [[ -n $REFRESH || $(elf_arch "$dir/$name" 2>/dev/null) != "$arch" ]]; then
             rm -f "$dir/$name"
             local ok=""
-            if [[ $repo == cross:* ]]; then
+            if [[ $build == cross:* ]]; then
                 # Built from source by cross/NAME.sh ARCH OUT, which fails
                 # for arches it can't build.
                 log "building $name for $arch"
-                if "$SCRIPT_DIR/cross/${repo#cross:}.sh" "$arch" "$dir/$name" </dev/null >&2 \
+                if "$SCRIPT_DIR/cross/${build#cross:}.sh" "$arch" "$dir/$name" </dev/null >&2 \
                     && [[ $(elf_arch "$dir/$name") == "$arch" ]]; then
                     ok=1
                 else
                     rm -f "$dir/$name"
                 fi
-            elif fetch_release "$name" "$repo" "$file" "$spec" "$arch" "$dir/$name"; then
+            elif [[ $release != - ]] \
+                && fetch_release "$name" "$release" "$(app "$name" file)" "$(app "$name" assets)" "$arch" "$dir/$name"; then
                 ok=1
             fi
             if [[ -z $ok ]]; then
-                log "warning: no $arch build of $name ($repo), skipping"
+                log "warning: no $arch build of $name (${build/#-/$release}), skipping"
                 continue
             fi
             log "fetched $name for $arch"
         fi
         cp "$dir/$name" "$dest/$name"
         chmod +x "$dest/$name"
-    done <"$SCRIPT_DIR/tools.tsv"
+    done
 }
 
 fetch_git_externals() {
     local dest=$1 tmp=$2
     local path url args key src
-    chezmoi --source="$REPO" --config="$tmp/chezmoi.toml" \
+    chezmoi --source="$CHEZMOI_SRC" --config="$tmp/chezmoi.toml" \
         --persistent-state="$tmp/chezmoistate.db" --destination="$tmp/fake-home" \
-        execute-template <"$REPO/home/.chezmoiexternal.toml.tmpl" >"$tmp/externals.toml" \
+        execute-template <"$CHEZMOI_SRC/home/.chezmoiexternal.toml.tmpl" >"$tmp/externals.toml" \
         2> >(grep -v 'config file template has changed' >&2) \
         || die "could not render .chezmoiexternal.toml.tmpl"
     while IFS=$'\t' read -r path url args; do
@@ -288,7 +326,7 @@ export_dotfiles() {
     # even if the exclude below were dropped.
     printf '[data]\n    machine = "container"\n    hasSecrets = false\n' >"$tmp/chezmoi.toml"
     for path in "${EXPORT_PATHS[@]}"; do targets+=("$fake_home/$path"); done
-    chezmoi --source="$REPO" --config="$tmp/chezmoi.toml" \
+    chezmoi --source="$CHEZMOI_SRC" --config="$tmp/chezmoi.toml" \
         --persistent-state="$tmp/chezmoistate.db" --destination="$fake_home" \
         archive --format=tar --exclude=encrypted,scripts,externals \
         --output="$tmp/dotfiles.tar" "${targets[@]}" \
@@ -299,7 +337,7 @@ export_dotfiles() {
 
     targets=()
     for path in "${EXPORT_EXTERNALS[@]}"; do targets+=("$fake_home/$path"); done
-    chezmoi --source="$REPO" --config="$tmp/chezmoi.toml" \
+    chezmoi --source="$CHEZMOI_SRC" --config="$tmp/chezmoi.toml" \
         --persistent-state="$tmp/chezmoistate.db" --destination="$fake_home" \
         archive --format=tar --exclude=encrypted,scripts \
         --output="$tmp/externals.tar" "${targets[@]}" \
@@ -320,13 +358,13 @@ export_dotfiles() {
 }
 
 usage() {
-    sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
     set -euo pipefail
 
-    local arch="" force="" out=""
+    local arch="" force="" out="" chezmoi=""
     REFRESH=""
     while (( $# )); do
         case $1 in
@@ -334,15 +372,17 @@ main() {
             --force) force=1; shift ;;
             --refresh) REFRESH=1; force=1; shift ;;
             --out) out=${2:-}; shift 2 ;;
+            --chezmoi) chezmoi=${2:-}; shift 2 ;;
             -h | --help) usage; exit 0 ;;
             *) usage >&2; exit 2 ;;
         esac
     done
     [[ -n $arch ]] || { usage >&2; exit 2; }
+    resolve_chezmoi_src "$chezmoi" || exit 2
     arch="$(normalize_arch "$arch")" || exit 1
 
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+    DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
     CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable"
     out="${out:-$CACHE/dist}"
     mkdir -p "$out"
@@ -352,7 +392,7 @@ main() {
     local version_file="$out/zsh-portable-$arch.version"
     local stamp
     YUPPS_DIR="$(yupps_dir)"
-    stamp="$(input_stamp "$REPO" "$arch" "$YUPPS_DIR")"
+    stamp="$(input_stamp "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$YUPPS_DIR")"
     if [[ -z $force && -s $bundle && -s $version_file \
         && $(cat "$stamp_file" 2>/dev/null) == "$stamp" ]]; then
         log "up to date: $bundle"
@@ -382,6 +422,7 @@ main() {
     local version
     version="$(tree_hash "$app")"
     echo "$version" >"$app/VERSION"
+    build_info "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" >"$app/BUILDINFO"
     # Owned by root in the archive, so root unpacking it on a host doesn't
     # leave files writable by whoever has this machine's uid there.
     tar --owner=0 --group=0 --numeric-owner -czf "$bundle.tmp" -C "$app" .
