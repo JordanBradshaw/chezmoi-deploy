@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for portable/build-tools.sh: profiles, tools.tsv sources,
+# Tests for portable/build-tools.sh: profiles, manifest sources,
 # version locks, recipes, verification, cache and fallbacks.
 #
 # Network, compilers and eget are stubs on a sandboxed PATH that log their
@@ -20,7 +20,7 @@ FAIL=0
 setup() {
     SANDBOX="$(mktemp -d)"
     export SANDBOX
-    unset TOOLS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
+    unset APPS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
         STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF
     OUTPUT=""
     STATUS=0
@@ -91,7 +91,7 @@ test_usage_without_profile_exits_2() {
 }
 
 # ---------------------------------------------------------------------------
-# tools.tsv sources
+# manifest sources
 # ---------------------------------------------------------------------------
 
 # tsv_rows: tools.tsv without comments and blank lines.
@@ -150,12 +150,19 @@ fixture() {
     printf '%s\n' "$2" >"$FIXTURES/$(printf '%s' "$1" | tr '/:' '__')"
 }
 
-# use_tools ROWS: a small tools.tsv for the test (TOOLS_FILE), and a locks
-# dir (LOCKS_DIR) in the sandbox.
+# manifest_rows ROWS: old-style rows (name repo file assets source) as
+# apps.tsv rows, with the header; a "release" source is the "-" build column.
+manifest_rows() {
+    echo '# name tier bundle apt pacman dnf brew release file assets build'
+    printf '%s\n' "$1" | awk 'NF { b = ($5 == "release") ? "-" : $5; print $1, "-", "y", "-", "-", "-", "-", $2, $3, $4, b }'
+}
+
+# use_tools ROWS: a small manifest for the test (APPS_FILE) from old-style
+# rows, and a locks dir (LOCKS_DIR) in the sandbox.
 use_tools() {
-    printf '%s\n' "$1" >"$SANDBOX/tools.tsv"
+    manifest_rows "$1" >"$SANDBOX/apps.tsv"
     mkdir -p "$SANDBOX/locks"
-    export TOOLS_FILE="$SANDBOX/tools.tsv" LOCKS_DIR="$SANDBOX/locks"
+    export APPS_FILE="$SANDBOX/apps.tsv" LOCKS_DIR="$SANDBOX/locks"
 }
 
 # btp CODE: bt with the stubs first on PATH.
@@ -474,7 +481,7 @@ EOF
     chmod +x "$STUBS/readelf"
 }
 
-# main_stubs ROWS LOCK: recipe and readelf stubs, a small tools.tsv and a
+# main_stubs ROWS LOCK: recipe and readelf stubs, a small manifest and a
 # lock (printf format, tab-separated).
 main_stubs() {
     recipe_stubs
@@ -497,6 +504,32 @@ cached_rg() {
     local hash
     hash="$(PATH="$STUBS:$PATH" "$BASH_BIN" -c "source '$BUILD_TOOLS'; load_profile x86_64-v3; load_tools; recipe_hash rg")"
     echo "$XDG_CACHE_HOME/zsh-portable/tools/x86_64-v3/rg/15.2.0-$hash/rg"
+}
+
+test_chezmoi_flag_sets_locks_dir() {
+    main_stubs "$RG_ONLY"
+    unset APPS_FILE LOCKS_DIR
+    local cz="$SANDBOX/cz"
+    mkdir -p "$cz/apps/locks"
+    manifest_rows "$RG_ONLY" >"$cz/apps/apps.tsv"
+    printf "$RG_LOCK" >"$cz/apps/locks/x86_64-v3.lock"
+    cp "$REPO_DIR/apps/lib.sh" "$cz/apps/lib.sh"
+    crate_fixture ripgrep 15.2.0
+    run_main --chezmoi "$cz" --locked
+    assert_eq "$STATUS" 0
+    grep -qP '^rg\tcrate:ripgrep:rg\t15.2.0\t' "$SANDBOX/out/tools.lock" || fail "lock not read from cz: $OUTPUT"
+    return 0
+}
+
+test_non_bundle_rows_ignored() {
+    main_stubs "$RG_ONLY" "$RG_LOCK"
+    printf 'zz  -  n  -  -  -  -  x/zz  zz  -  release\n' >>"$APPS_FILE"
+    crate_fixture ripgrep 15.2.0
+    run_main
+    assert_eq "$STATUS" 0
+    grep -q '^zz' "$SANDBOX/out/tools.lock" && fail "zz in tools.lock"
+    [[ -e $SANDBOX/out/bin/zz ]] && fail "zz built"
+    return 0
 }
 
 test_verify_rejects_wrong_arch() {
@@ -563,7 +596,7 @@ test_recipe_change_rebuilds() {
     main_stubs "$RG_ONLY" "$RG_LOCK"
     crate_fixture ripgrep 15.2.0
     run_main
-    printf '%s\n' 'rg  BurntSushi/ripgrep  rg  musl|gnu  crate:ripgrep:rg:--features=pcre2' >"$TOOLS_FILE"
+    manifest_rows 'rg  BurntSushi/ripgrep  rg  musl|gnu  crate:ripgrep:rg:--features=pcre2' >"$APPS_FILE"
     : >"$STUB_LOG"
     run_main
     grep -q '^cargo zigbuild.*--features=pcre2' "$STUB_LOG" || fail "changed recipe not rebuilt: $(cat "$STUB_LOG")"
@@ -909,7 +942,7 @@ test_out_replaced_only_when_done() {
     # A run that dies mid-way (here: lock unreadable after the tools are
     # chosen) leaves the previous output alone.
     sed -i '2a [[ -n ${STUB_DIE:-} ]] && kill -9 $PPID' "$STUBS/eget"
-    printf '%s\n' 'lnav  tstack/lnav  lnav  musl  release' >"$TOOLS_FILE"
+    manifest_rows 'lnav  tstack/lnav  lnav  musl  release' >"$APPS_FILE"
     printf 'lnav\trelease\tv1\n' >"$LOCKS_DIR/x86_64-v3.lock"
     STUB_DIE=1 run_main
     assert_eq "$(cat "$SANDBOX/out/tools.lock")" "$before"
