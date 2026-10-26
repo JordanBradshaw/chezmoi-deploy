@@ -28,6 +28,8 @@ PORTABLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$PORTABLE_DIR/profiles"
 TOOLS_FILE=${TOOLS_FILE:-$PORTABLE_DIR/tools.tsv}
 LOCKS_DIR=${LOCKS_DIR:-$PORTABLE_DIR/locks}
+CROSS_DIR=${CROSS_DIR:-$PORTABLE_DIR/cross}
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable"
 
 # shellcheck source=lib.sh
 source "$PORTABLE_DIR/lib.sh"
@@ -187,6 +189,90 @@ resolve_versions() {
             log "$name: version lookup failed, no locked version"
         fi
     done
+}
+
+# build_crate NAME SOURCE VERSION OUT: cargo zigbuild the crates.io package
+# for the profile's target and CPU. SOURCE is crate:CRATE[:BIN][:ARGS], ARGS
+# comma-separated cargo arguments. Packages without a Cargo.lock build
+# unlocked.
+build_crate() {
+    local name=$1 source=$2 version=$3 out=$4 crate bin args work dir
+    local -a extra=() locked=(--locked)
+    IFS=: read -r _ crate bin args <<<"$source"
+    bin=${bin:-$crate}
+    [[ -n $args ]] && IFS=, read -r -a extra <<<"$args"
+    mkdir -p "$CACHE_ROOT/tmp"
+    work="$(mktemp -d "$CACHE_ROOT/tmp/crate.XXXXXX")"
+    if ! http_get "https://crates.io/api/v1/crates/$crate/$version/download" >"$work/crate.tar.gz" \
+        || ! tar -xzf "$work/crate.tar.gz" -C "$work"; then
+        rm -rf "$work"
+        return 1
+    fi
+    dir="$work/$crate-$version"
+    [[ -f $dir/Cargo.lock ]] || locked=()
+    local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME"
+    if (cd "$dir" && env RUSTFLAGS="-C target-cpu=$RUST_CPU" \
+        CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+        CARGO_TARGET_DIR="$target_dir" \
+        cargo zigbuild --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
+        && install -D -m755 "$target_dir/$(rust_target_dir)/release/$bin" "$out"; then
+        rm -rf "$work"
+        return 0
+    fi
+    rm -rf "$work"
+    return 1
+}
+
+# build_go NAME SOURCE VERSION OUT: go install the module (or its //SUBPKG)
+# for the profile's GOARCH, stripped and without build paths.
+build_go() {
+    local name=$1 source=$2 version=$3 out=$4 pkg bin gopath goarch=""
+    local -a goenv=()
+    pkg=${source#go:}
+    pkg=${pkg/\/\//\/}
+    bin=${pkg##*/}
+    # Major-version suffixes (/v2) aren't part of the binary name.
+    [[ $bin =~ ^v[0-9]+$ ]] && { bin=${pkg%/*}; bin=${bin##*/}; }
+    read -r -a goenv <<<"$GO_ENV"
+    for v in "${goenv[@]}"; do [[ $v == GOARCH=* ]] && goarch=${v#GOARCH=}; done
+    mkdir -p "$CACHE_ROOT/tmp"
+    gopath="$(mktemp -d "$CACHE_ROOT/tmp/go.XXXXXX")"
+    if env GOPATH="$gopath" GOMODCACHE="$CACHE_ROOT/gomod" GOCACHE="$CACHE_ROOT/gobuild" \
+        GOFLAGS=-modcacherw GOOS=linux "${goenv[@]}" \
+        go install -trimpath "-ldflags=-s -w" "$pkg@$version" >&2; then
+        # Cross builds land in bin/linux_GOARCH.
+        local f
+        for f in "$gopath/bin/$bin" "$gopath/bin/linux_$goarch/$bin"; do
+            if [[ -f $f ]]; then
+                install -D -m755 "$f" "$out"
+                rm -rf "$gopath"
+                return 0
+            fi
+        done
+    fi
+    rm -rf "$gopath"
+    return 1
+}
+
+# build_recipe NAME SOURCE REPO FILE SPEC VERSION OUT: make NAME's binary at
+# OUT from its source at VERSION (see the header).
+build_recipe() {
+    local name=$1 source=$2 repo=$3 file=$4 spec=$5 version=$6 out=$7
+    rm -f "$out"
+    mkdir -p "$(dirname "$out")"
+    case $source in
+        crate:*) build_crate "$name" "$source" "$version" "$out" ;;
+        go:*) build_go "$name" "$source" "$version" "$out" ;;
+        cross:*)
+            if [[ $NEEDS_SDK != 1 ]]; then
+                log "$name: $source needs the Yocto SDK (profile $PROFILE_NAME has none)"
+                return 1
+            fi
+            "$CROSS_DIR/${source#cross:}.sh" "$PROFILE_ARCH" "$out" </dev/null >&2
+            ;;
+        release) fetch_release "$name" "$repo" "$file" "$spec" "$PROFILE_ARCH" "$out" "$version" ;;
+        *) log "$name: unknown source $source"; return 1 ;;
+    esac
 }
 
 main() {
