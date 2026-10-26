@@ -1,0 +1,7 @@
+{
+  "name": "chezmoi-deploy builder",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "../features/src/zsh-builder": {}
+  }
+}
