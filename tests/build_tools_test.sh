@@ -341,7 +341,7 @@ recipe_stubs() {
 #!/usr/bin/env bash
 eval "$MAKE_ELF"
 echo "cargo $* [in ${PWD##*/}]" >>"$STUB_LOG"
-echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS STRIP=${CARGO_PROFILE_RELEASE_STRIP:-}" >>"$STUB_LOG"
+echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS STRIP=${CARGO_PROFILE_RELEASE_STRIP:-} TOOLCHAIN=${RUSTUP_TOOLCHAIN:-}" >>"$STUB_LOG"
 [[ -n ${STUB_CARGO_FAIL:-} ]] && exit 101
 target="" bin=""
 while (( $# )); do
@@ -393,7 +393,7 @@ test_crate_build_uses_zigbuild_target_and_cpu() {
     assert_eq "$STATUS" 0
     grep -qx "cargo zigbuild --release --locked --target x86_64-unknown-linux-musl --bin rg \[in ripgrep-15.2.0\]" "$STUB_LOG" ||
         fail "cargo call: $(cat "$STUB_LOG")"
-    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=x86-64-v3 LTO=fat CGU=1 STRIP=symbols" "$STUB_LOG" || fail "cargo env: $(cat "$STUB_LOG")"
+    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=x86-64-v3 LTO=fat CGU=1 STRIP=symbols TOOLCHAIN=stable" "$STUB_LOG" || fail "cargo env: $(cat "$STUB_LOG")"
     [[ -x $SANDBOX/out/rg ]] || fail "no binary"
     return 0
 }
@@ -665,6 +665,17 @@ test_failed_build_without_cache_uses_release() {
     return 0
 }
 
+# Upstream release binaries are used as published (some only ship glibc
+# builds); the static/glibc checks are for binaries built here.
+test_release_source_is_not_required_static() {
+    main_stubs 'lnav  tstack/lnav  lnav  musl  release' 'lnav\trelease\tv0.14.1\n'
+    STUB_READELF_INTERP=1 run_main
+    assert_eq "$STATUS" 0
+    grep -qP '^lnav\trelease\tv0.14.1\t[0-9a-f]{64}\tbuilt$' "$SANDBOX/out/tools.lock" ||
+        fail "tools.lock: $(cat "$SANDBOX/out/tools.lock")"
+    return 0
+}
+
 test_tool_with_nothing_is_reported_and_skipped() {
     main_stubs "$TWO_TOOLS" 'rg\tcrate:ripgrep:rg\t15.2.0\nfzf\tgo:github.com/junegunn/fzf\tv0.66.0\n'
     crate_fixture ripgrep 15.2.0
@@ -806,6 +817,21 @@ test_cache_root_override() {
     assert_eq "$OUTPUT" "/y/zp"
     OUTPUT="$(XDG_CACHE_HOME=/x "$BASH_BIN" -c "unset ZSH_PORTABLE_CACHE; source '$BUILD_TOOLS'; echo \$CACHE_ROOT")"
     assert_eq "$OUTPUT" "/x/zsh-portable"
+}
+
+# The token comes from the host (env, secrets file or gh) like for eget, and
+# reaches the container by name only (never on the docker command line).
+test_builder_run_passes_github_token_from_secrets() {
+    docker_stub
+    mkdir -p "$SANDBOX/cfg/secrets"
+    printf 'EGET_GITHUB_TOKEN=s3cret\n' >"$SANDBOX/cfg/secrets/env"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" docker "$@" >>"$STUB_LOG"\necho "token=$EGET_GITHUB_TOKEN" >>"$STUB_LOG"\n' >"$STUBS/docker"
+    env -u EGET_GITHUB_TOKEN XDG_CONFIG_HOME="$SANDBOX/cfg" XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" \
+        "$BASH_BIN" "$BUILDER" run true >/dev/null 2>&1
+    grep -qx -- "EGET_GITHUB_TOKEN" "$STUB_LOG" || fail "token not passed: $(tr '\n' ' ' <"$STUB_LOG")"
+    grep -qx "token=s3cret" "$STUB_LOG" || fail "token not in docker's env"
+    grep -q "s3cret" <(grep -v '^token=' "$STUB_LOG") && fail "token on the command line"
+    return 0
 }
 
 test_builder_usage() {

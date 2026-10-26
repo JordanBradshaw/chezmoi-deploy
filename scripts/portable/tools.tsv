@@ -17,8 +17,11 @@
 #   source  how build-tools.sh makes it for a profile (see its header):
 #           crate:CRATE[:BIN][:ARGS], go:MODULE[//SUBPKG], cross:NAME, or
 #           release (the eget columns above). Rows sharing a crates.io name
-#           with another project (usbtree) or needing C libraries the
-#           static build lacks (rustnet: libpcap) use release.
+#           with another project (usbtree), needing C libraries the
+#           static build lacks (rustnet: libpcap, atuin: OpenSSL, tracexec:
+#           libbpf/libelf, comchan: fontconfig), not building against musl
+#           (cyme), crashing rustc under fat LTO (zellij) or having go.mod
+#           replace directives go install refuses (ctop) use release.
 #
 # Static musl builds come first so binaries run on older glibc (JetPack 4 is
 # Ubuntu 18.04). A tool with no build for an arch is skipped with a warning.
@@ -30,7 +33,7 @@ rg             BurntSushi/ripgrep              rg             musl|gnu          
 fd             sharkdp/fd                      fd             musl|gnu                              crate:fd-find:fd
 delta          dandavison/delta                delta          musl|gnu                              crate:git-delta:delta
 zoxide         ajeetdsouza/zoxide              zoxide         musl                                  crate:zoxide
-atuin          atuinsh/atuin                   atuin          musl,^server|gnu,^server              crate:atuin
+atuin          atuinsh/atuin                   atuin          musl,^server|gnu,^server              release
 direnv         direnv/direnv                   direnv         -                                     go:github.com/direnv/direnv/v2
 btm            ClementTsang/bottom             btm            musl,tar.gz|gnu,tar.gz                crate:bottom:btm
 dust           bootandy/dust                   dust           musl|gnu                              crate:du-dust:dust
@@ -50,15 +53,15 @@ xfr            lance0/xfr                      xfr            musl|gnu          
 snitch         karol-broda/snitch              snitch         tar.gz                                go:github.com/karol-broda/snitch
 trip           fujiapple852/trippy             trip           musl|gnu                              crate:trippy:trip
 gping          orf/gping                       gping          musl|gnu|-                            crate:gping
-tracexec       kxxt/tracexec                   tracexec       static|-                              crate:tracexec
-cyme           tuna-f1sh/cyme                  cyme           musl|gnu                              crate:cyme
+tracexec       kxxt/tracexec                   tracexec       static|-                              release
+cyme           tuna-f1sh/cyme                  cyme           musl|gnu                              release
 usbtree        gnomeria/usbtree                usbtree        tar.gz                                release
 viddy          sachaos/viddy                   viddy          tar.gz                                crate:viddy
 lnav           tstack/lnav                     lnav           musl                                  release
-zellij         zellij-org/zellij               zellij         musl,^no-web|musl                     crate:zellij
-ctop           bcicen/ctop                     ctop*          -                                     go:github.com/bcicen/ctop
+zellij         zellij-org/zellij               zellij         musl,^no-web|musl                     release
+ctop           bcicen/ctop                     ctop*          -                                     release
 dive           wagoodman/dive                  dive           tar.gz                                go:github.com/wagoodman/dive
-comchan        Vaishnav-Sabari-Girish/ComChan  comchan        musl|gnu                              crate:comchan
+comchan        Vaishnav-Sabari-Girish/ComChan  comchan        musl|gnu                              release
 binsider       orhun/binsider                  binsider       musl|gnu                              crate:binsider
 pueue          Nukesor/pueue                   pueue*         pueue-                                crate:pueue
 pueued         Nukesor/pueue                   pueued*        pueued                                crate:pueue:pueued

@@ -10,7 +10,9 @@
 #   zsh-portable cache (${XDG_CACHE_HOME:-~/.cache}/zsh-portable) at the same
 #   path as on the host, passed as ZSH_PORTABLE_CACHE so build-tools.sh finds
 #   the same cache. HOME, XDG_CACHE_HOME, cargo's registry and zig's cache
-#   are writable dirs inside it. BUILDER_IMAGE overrides the image.
+#   are writable dirs inside it. The host's GitHub token (EGET_GITHUB_TOKEN,
+#   ~/.config/secrets/env or gh) is passed in. BUILDER_IMAGE overrides the
+#   image.
 
 set -euo pipefail
 
@@ -20,7 +22,7 @@ XDG_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}
 CACHE="$XDG_CACHE/zsh-portable"
 
 usage() {
-    sed -n '3,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case ${1:-} in
@@ -30,6 +32,11 @@ case ${1:-} in
     run)
         shift
         (( $# )) || { usage >&2; exit 2; }
+        # GitHub API limits: the host's token (env, secrets file or gh),
+        # passed by name so it stays off the command line.
+        # shellcheck source=lib.sh
+        source "$REPO/scripts/portable/lib.sh"
+        load_github_token
         mkdir -p "$CACHE/home" "$CACHE/xdg-cache"
         tty=()
         [[ -t 0 && -t 1 ]] && tty=(-it)
