@@ -814,13 +814,15 @@ test_builder_image_builds_dockerfile() {
 test_builder_run_mounts_repo_and_cache() {
     docker_stub
     local cache="$SANDBOX/xdg/zsh-portable"
-    XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" run echo hi >/dev/null 2>&1
+    mkdir -p "$SANDBOX/cz/apps"
+    cp "$REPO_DIR/apps/apps.tsv" "$REPO_DIR/apps/lib.sh" "$SANDBOX/cz/apps/"
+    CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" run echo hi >/dev/null 2>&1
     local log
     log="$(tr '\n' ' ' <"$STUB_LOG")"
     [[ -d $cache ]] || fail "cache dir not created"
     local want
     for want in "docker run --rm" "--user $(id -u):$(id -g)" "-v $REPO_DIR:/src" "-w /src" \
-        "-v $cache:$cache" "-e ZSH_PORTABLE_CACHE=$cache" "-e XDG_CACHE_HOME=$cache/xdg-cache" "-e HOME=$cache/home" \
+        "-v $SANDBOX/cz:/chezmoi" "-e CHEZMOI_SRC=/chezmoi" "-v $cache:$cache" "-e ZSH_PORTABLE_CACHE=$cache" "-e XDG_CACHE_HOME=$cache/xdg-cache" "-e HOME=$cache/home" \
         "-e CARGO_HOME=$cache/cargo-home" "-e ZIG_GLOBAL_CACHE_DIR=$cache/zig" \
         "zsh-builder:local echo hi"; do
         [[ $log == *"$want "* ]] || fail "missing '$want' in: $log"
