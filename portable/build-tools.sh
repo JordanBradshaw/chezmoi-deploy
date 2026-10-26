@@ -3,16 +3,19 @@
 # Build the zssh bundle's tools for a target profile.
 #
 # Usage: build-tools.sh --profile NAME [--resolve | --locked] [--only a,b]
-#                       [--out DIR]
+#                       [--out DIR] [--chezmoi DIR]
 #
 #   NAME is a file in profiles/ (arch, Rust target and CPU, Go settings).
-#   Each tools.tsv row says how its tool is made (the source column):
+#   The manifest (apps/apps.tsv) and the locks (apps/locks/NAME.lock) come
+#   from the chezmoi tree: --chezmoi DIR, else $CHEZMOI_SRC, else the
+#   checkout of `chezmoi source-path`. The rows with bundle=y are built; the
+#   build column says how (- means release):
 #     crate:CRATE[:BIN][:ARGS]  cargo zigbuild from the crates.io source
 #     go:MODULE[//SUBPKG]       go install for the profile's GOARCH
 #     cross:NAME                cross/NAME.sh (needs the Yocto SDK)
 #     release                   the upstream release, with eget
 #
-#   Versions come from locks/NAME.lock. --locked (the default) builds exactly
+#   Versions come from the chezmoi tree's apps/locks/NAME.lock. --locked (the default) builds exactly
 #   those; --resolve looks up the latest version of every tool and rewrites
 #   the lock. A tool missing from the lock is looked up either way.
 #
@@ -26,8 +29,9 @@
 
 PORTABLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$PORTABLE_DIR/profiles"
-TOOLS_FILE=${TOOLS_FILE:-$PORTABLE_DIR/tools.tsv}
-LOCKS_DIR=${LOCKS_DIR:-$PORTABLE_DIR/locks}
+# Env overrides (tests); resolve_chezmoi_src resets APPS_FILE.
+USER_APPS_FILE=${APPS_FILE:-}
+USER_LOCKS_DIR=${LOCKS_DIR:-}
 CROSS_DIR=${CROSS_DIR:-$PORTABLE_DIR/cross}
 CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 
@@ -35,7 +39,15 @@ CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 source "$PORTABLE_DIR/lib.sh"
 resolve_chezmoi_src || return 1 2>/dev/null || exit 1
 
-# Per tool, from tools.tsv (in file order: NAMES) and the lock (LOCK).
+# set_chezmoi_defaults: APPS_FILE and LOCKS_DIR from CHEZMOI_SRC unless the
+# environment set them.
+set_chezmoi_defaults() {
+    APPS_FILE=${USER_APPS_FILE:-$CHEZMOI_SRC/apps/apps.tsv}
+    LOCKS_DIR=${USER_LOCKS_DIR:-$CHEZMOI_SRC/apps/locks}
+}
+set_chezmoi_defaults
+
+# Per tool, from the manifest (in file order: NAMES) and the lock (LOCK).
 declare -a NAMES=()
 declare -gA SOURCES=() REPOS=() FILES=() SPECS=() LOCK=()
 ONLY=""
@@ -44,7 +56,7 @@ log() { echo "build-tools: $*" >&2; }
 die() { echo "build-tools: error: $*" >&2; exit 1; }
 
 usage() {
-    sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # load_profile NAME: set PROFILE_NAME PROFILE_ARCH RUST_TARGET RUST_CPU
@@ -72,16 +84,19 @@ selected() {
     [[ -z $ONLY || ,$ONLY, == *",$1,"* ]]
 }
 
-# load_tools: the per-tool arrays for every tools.tsv row, and NAMES (file
-# order) for the rows --only selects.
+# load_tools: the per-tool arrays for every bundle=y app of the manifest, and
+# NAMES (file order) for the ones --only selects.
 load_tools() {
-    local name repo file spec source
+    local name build
     NAMES=()
-    while read -r name repo file spec source; do
-        [[ -z $name || $name == \#* ]] && continue
-        REPOS[$name]=$repo FILES[$name]=$file SPECS[$name]=$spec SOURCES[$name]=$source
+    apps_load "$APPS_FILE" || die "cannot read the manifest"
+    while read -r name; do
+        build=$(app "$name" build)
+        [[ $build == - ]] && build=release
+        REPOS[$name]=$(app "$name" release) FILES[$name]=$(app "$name" file)
+        SPECS[$name]=$(app "$name" assets) SOURCES[$name]=$build
         if selected "$name"; then NAMES+=("$name"); fi
-    done <"$TOOLS_FILE"
+    done < <(apps_names --bundle)
 }
 
 # http_get URL: print the body of URL. Fails with 4 for a 404 (e.g. a repo
@@ -175,7 +190,7 @@ lock_file() {
 }
 
 # read_lock: LOCK from the profile's lock, if there is one (after load_tools,
-# so entries whose source no longer matches tools.tsv are dropped).
+# so entries whose source no longer matches the manifest are dropped).
 read_lock() {
     local name source version file
     file="$(lock_file)"
@@ -183,7 +198,7 @@ read_lock() {
     [[ -r $file ]] || return 0
     while IFS=$'\t' read -r name source version; do
         [[ -z $name || $name == \#* ]] && continue
-        # Locked for another origin (the tsv row changed from crate to
+        # Locked for another origin (the manifest row changed from crate to
         # release, another crate, ...): look it up again.
         [[ -n ${SOURCES[$name]:-} && $(version_origin "${SOURCES[$name]}") != "$(version_origin "$source")" ]] && continue
         LOCK[$name]=$version
@@ -191,7 +206,7 @@ read_lock() {
 }
 
 # write_lock: the profile's lock from LOCK, sorted, for every tool in
-# tools.tsv (entries of tools outside --only are kept as they were).
+# the manifest (entries of tools outside --only are kept as they were).
 write_lock() {
     local file name
     file="$(lock_file)"
@@ -338,7 +353,7 @@ verify_binary() {
 # Build settings applied by build_crate/build_go; part of every cache key.
 BUILD_SETTINGS="cargo: lto=fat codegen-units=1 strip=symbols; go: -trimpath -ldflags=-s -w"
 
-# recipe_hash NAME: short hash of NAME's tools.tsv row, the profile,
+# recipe_hash NAME: short hash of NAME's manifest fields, the profile,
 # BUILD_SETTINGS and (cross recipes) the recipe scripts, so a changed recipe
 # never reuses an old build.
 recipe_hash() {
@@ -412,7 +427,7 @@ obtain_tool() {
 
 main() {
     set -euo pipefail
-    local profile="" mode=locked only="" out=""
+    local profile="" mode=locked only="" out="" chezmoi=""
     while (( $# )); do
         case $1 in
             --profile) profile=${2:-}; shift 2 ;;
@@ -420,11 +435,16 @@ main() {
             --locked) mode=locked; shift ;;
             --only) only=${2:-}; shift 2 ;;
             --out) out=${2:-}; shift 2 ;;
+            --chezmoi) chezmoi=${2:-}; shift 2 ;;
             -h | --help) usage; exit 0 ;;
             *) usage >&2; exit 2 ;;
         esac
     done
     [[ -n $profile ]] || { usage >&2; exit 2; }
+    if [[ -n $chezmoi ]]; then
+        resolve_chezmoi_src "$chezmoi" || exit 2
+        set_chezmoi_defaults
+    fi
     load_profile "$profile" || exit 2
     ONLY=$only
     out=${out:-$CACHE_ROOT/tools-out/$PROFILE_NAME}
