@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "name": "zsh-portable builder",
   "description": "Toolchains to cross-build the zssh bundle's tools per target profile: rustup with targets, zig and cargo-zigbuild, Go, eget, binutils.",
-  "documentationURL": "https://github.com/JordanBradshaw/zsh-config/tree/config/features/src/zsh-builder",
+  "documentationURL": "https://github.com/JordanBradshaw/chezmoi-deploy/tree/main/features/src/zsh-builder",
   "options": {
     "rustTargets": {
       "type": "string",
