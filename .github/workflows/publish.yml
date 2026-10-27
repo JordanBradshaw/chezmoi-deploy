@@ -1,0 +1,47 @@
+name: publish
+
+on:
+  schedule:
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EGET_GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y zsh python3 binutils
+      - name: Install chezmoi and eget
+        run: |
+          mkdir -p ~/.local/bin
+          sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
+          (cd /tmp && curl -fsSL https://zyedidia.github.io/eget.sh | sh && mv /tmp/eget ~/.local/bin/)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/chezmoi
+          ref: main
+          path: chezmoi
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/yupps-zsh
+          path: yupps-zsh
+      - name: Build dev bundle
+        run: |
+          CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" ZSSH_YUPPS_DIR="$GITHUB_WORKSPACE/yupps-zsh" \
+            bash portable/build.sh --target dev --arch x86_64 --out "$RUNNER_TEMP/dist"
+      - name: Publish (feature e2e gate when version changed)
+        env:
+          PUBLISH_GATE: tests/feature_test.sh
+        run: bash portable/publish-release.sh "$RUNNER_TEMP/dist"
