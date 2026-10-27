@@ -1,8 +1,10 @@
 name: publish
 
 on:
+  push:
+    branches: [main]
   schedule:
-    - cron: '30 5 * * *'
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 permissions:
