@@ -8,7 +8,7 @@
 #   NAME is a file in profiles/ (arch, Rust target and CPU, Go settings).
 #   The manifest (apps/apps.tsv) and the locks (apps/locks/NAME.lock) come
 #   from the chezmoi tree: --chezmoi DIR, else $CHEZMOI_SRC, else the
-#   checkout of `chezmoi source-path`. The rows with bundle=y are built; the
+#   checkout of `chezmoi source-path`. The rows with portable=zssh are built; the
 #   build column says how (- means release):
 #     crate:CRATE[:BIN][:ARGS]  cargo zigbuild from the crates.io source
 #     go:MODULE[//SUBPKG]       go install for the profile's GOARCH
@@ -88,7 +88,7 @@ selected() {
     [[ -z $ONLY || ,$ONLY, == *",$1,"* ]]
 }
 
-# load_tools: the per-tool arrays for every bundle=y app of the manifest, and
+# load_tools: the per-tool arrays for every portable=zssh app of the manifest, and
 # NAMES (file order) for the ones --only selects.
 load_tools() {
     local name build
@@ -100,7 +100,7 @@ load_tools() {
         REPOS[$name]=$(app "$name" release) FILES[$name]=$(app "$name" file)
         SPECS[$name]=$(app "$name" assets) SOURCES[$name]=$build
         if selected "$name"; then NAMES+=("$name"); fi
-    done < <(apps_names --bundle)
+    done < <(apps_names --portable zssh)
 }
 
 # http_get URL: print the body of URL. Fails with 4 for a 404 (e.g. a repo

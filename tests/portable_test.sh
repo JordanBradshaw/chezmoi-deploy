@@ -241,7 +241,7 @@ test_tree_hash_handles_directory_symlinks() {
 # Cross-built tools
 # ---------------------------------------------------------------------------
 
-# fake_cross_env: a manifest with one cross: row and one bundle=- row, and a
+# fake_cross_env: a manifest with one cross: row and one portable=- row, and a
 # cross script that writes an aarch64 ELF, or fails for other arches.
 fake_cross_env() {
     SCRIPT_DIR="$SANDBOX/portable"
@@ -250,8 +250,8 @@ fake_cross_env() {
     mkdir -p "$SCRIPT_DIR/cross"
     APPS_FILE="$SANDBOX/apps.tsv"
     {
-        echo '# name tier bundle apt pacman dnf brew release file assets build'
-        echo 'fake extra y - - - - - fake - cross:fake'
+        echo '# name tier portable apt pacman dnf brew release file assets build'
+        echo 'fake extra zssh - - - - - fake - cross:fake'
         echo 'other core - - - - - o/o other - -'
     } >"$APPS_FILE"
     {
@@ -266,31 +266,81 @@ fake_cross_env() {
 
 test_fetch_tools_runs_cross_script() {
     fake_cross_env
-    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" 2>&1)"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh 2>&1)"
     assert_call_matches "^cross aarch64 $CACHE/tools/aarch64/fake$"
     assert_eq "$(elf_arch "$SANDBOX/bin/fake")" aarch64
 }
 
 test_fetch_tools_uses_manifest() {
     fake_cross_env
-    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" 2>&1)"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh 2>&1)"
     assert_eq "$(grep -c '^cross' "$STUB_LOG")" 1
-    [[ ! -e $SANDBOX/bin/other ]] || fail "bundle=- row fetched"
-    [[ ! -e $CACHE/tools/aarch64/other ]] || fail "bundle=- row touched"
+    [[ ! -e $SANDBOX/bin/other ]] || fail "portable=- row fetched"
+    [[ ! -e $CACHE/tools/aarch64/other ]] || fail "portable=- row touched"
+}
+
+test_target_selects_rows() {
+    fake_cross_env
+    printf 'devonly extra dev - - - - o/d devonly - -\n' >>"$APPS_FILE"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/zbin" zssh 2>&1)"
+    [[ -x $SANDBOX/zbin/fake ]] || fail "zssh row missing from zssh"
+    [[ ! -e $SANDBOX/zbin/devonly ]] || fail "dev-only row in zssh"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/dbin" dev 2>&1)"
+    [[ ! -e $SANDBOX/dbin/fake ]] || fail "zssh-only row in dev"
+}
+
+test_input_stamp_includes_target() {
+    mkrepos
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64 zssh) != $(input_stamp "$CHEZ" "$DEP" x86_64 dev) ]] \
+        || fail "stamp ignores target"
+    return 0
+}
+
+test_bundle_names_per_target() {
+    mkrepos
+    local t
+    for t in zssh dev; do
+        (
+            export XDG_CACHE_HOME="$SANDBOX/cache" HOME="$SANDBOX/home"
+            mkdir -p "$HOME" "$SANDBOX/noyupps"
+            fetch_zsh() { mkdir -p "$2"; echo z >"$2/zsh"; }
+            fetch_tools() { mkdir -p "$2"; echo "$3" >"$2/tool"; }
+            fetch_plugins() { mkdir -p "$3"; echo p >"$3/p"; }
+            fetch_git_externals() { :; }
+            export_dotfiles() { mkdir -p "$1/.config/zsh"; echo plug >"$1/.config/zsh/.zsh_plugins.txt"; }
+            check_secrets() { return 0; }
+            yupps_dir() { echo "$SANDBOX/noyupps"; }
+            main --arch x86_64 --target "$t" --force --chezmoi "$CHEZ" --out "$SANDBOX/o" >/dev/null 2>&1
+        ) || fail "build $t failed"
+    done
+    local d="$SANDBOX/o"
+    for e in tar.gz version stamp; do
+        [[ -s $d/zsh-portable-x86_64.$e ]] || fail "missing zsh-portable-x86_64.$e"
+        [[ -s $d/zsh-portable-dev-x86_64.$e ]] || fail "missing zsh-portable-dev-x86_64.$e"
+    done
+    assert_eq "$(tar -xOzf "$d/zsh-portable-dev-x86_64.tar.gz" ./BUILDINFO | grep '^target')" "target dev"
+    assert_eq "$(tar -xOzf "$d/zsh-portable-dev-x86_64.tar.gz" ./bin/tool)" dev
+}
+
+test_unknown_target_rejected() {
+    OUTPUT="$(env CHEZMOI_SRC="$CHEZMOI_SRC" bash "$BUILD" --arch x86_64 --target bogus 2>&1)"
+    STATUS=$?
+    assert_status 2
+    assert_output_matches "Usage"
 }
 
 test_fetch_tools_reuses_cross_build() {
     fake_cross_env
-    fetch_tools aarch64 "$SANDBOX/bin" >/dev/null 2>&1
+    fetch_tools aarch64 "$SANDBOX/bin" zssh >/dev/null 2>&1
     : >"$STUB_LOG"
-    fetch_tools aarch64 "$SANDBOX/bin2" >/dev/null 2>&1
+    fetch_tools aarch64 "$SANDBOX/bin2" zssh >/dev/null 2>&1
     refute_call_matches "^cross"
     [[ -x $SANDBOX/bin2/fake ]] || fail "cached build not copied"
 }
 
 test_fetch_tools_skips_unsupported_cross_arch() {
     fake_cross_env
-    OUTPUT="$(fetch_tools armv7l "$SANDBOX/bin" 2>&1)"
+    OUTPUT="$(fetch_tools armv7l "$SANDBOX/bin" zssh 2>&1)"
     assert_output_matches "no armv7l build of fake"
     [[ ! -e $SANDBOX/bin/fake ]] || fail "unsupported arch produced a binary"
 }
@@ -426,9 +476,9 @@ mkrepos() {
 test_input_stamp_handles_deleted_tracked_files() {
     mkrepos
     local before after
-    before="$(input_stamp "$CHEZ" "$DEP" x86_64 2>"$SANDBOX/err")"
+    before="$(input_stamp "$CHEZ" "$DEP" x86_64 zssh 2>"$SANDBOX/err")"
     rm "$CHEZ/home/b"
-    after="$(input_stamp "$CHEZ" "$DEP" x86_64 2>"$SANDBOX/err")"
+    after="$(input_stamp "$CHEZ" "$DEP" x86_64 zssh 2>"$SANDBOX/err")"
     assert_eq "$(cat "$SANDBOX/err")" ""
     [[ -n $after && $after != "$before" ]] || fail "stamp unchanged after delete"
     return 0
@@ -437,14 +487,14 @@ test_input_stamp_handles_deleted_tracked_files() {
 test_input_stamp_sees_both_sides() {
     mkrepos
     local base
-    base="$(input_stamp "$CHEZ" "$DEP" x86_64)"
+    base="$(input_stamp "$CHEZ" "$DEP" x86_64 zssh)"
     echo x >"$CHEZ/scripts/s"
-    assert_eq "$(input_stamp "$CHEZ" "$DEP" x86_64)" "$base"
+    assert_eq "$(input_stamp "$CHEZ" "$DEP" x86_64 zssh)" "$base"
     echo x >"$CHEZ/apps/apps.tsv"
-    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$base" ]] || fail "chezmoi apps/ ignored"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64 zssh) != "$base" ]] || fail "chezmoi apps/ ignored"
     echo m >"$CHEZ/apps/apps.tsv"
     echo x >"$DEP/portable/p"
-    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$base" ]] || fail "deploy portable/ ignored"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64 zssh) != "$base" ]] || fail "deploy portable/ ignored"
     return 0
 }
 
@@ -453,18 +503,19 @@ test_build_info_lines() {
     local csha dsha
     csha="$(git -C "$CHEZ" rev-parse --short HEAD)"
     dsha="$(git -C "$DEP" rev-parse --short HEAD)"
-    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64)"
+    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64 zssh)"
     assert_eq "$(sed -n 1p <<<"$OUTPUT")" "chezmoi $csha"
     assert_eq "$(sed -n 2p <<<"$OUTPUT")" "deploy $dsha"
     assert_eq "$(sed -n 3p <<<"$OUTPUT")" "arch aarch64"
-    grep -qE '^built [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$(sed -n 4p <<<"$OUTPUT")" \
+    assert_eq "$(sed -n 4p <<<"$OUTPUT")" "target zssh"
+    grep -qE '^built [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$(sed -n 5p <<<"$OUTPUT")" \
         || fail "bad built line"
-    assert_eq "$(wc -l <<<"$OUTPUT")" 4
+    assert_eq "$(wc -l <<<"$OUTPUT")" 5
     echo x >"$CHEZ/home/a"
-    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64)"
+    OUTPUT="$(build_info "$CHEZ" "$DEP" aarch64 zssh)"
     assert_eq "$(sed -n 1p <<<"$OUTPUT")" "chezmoi $csha-dirty"
     assert_eq "$(sed -n 2p <<<"$OUTPUT")" "deploy $dsha"
-    OUTPUT="$(build_info "$SANDBOX" "$SANDBOX" aarch64)"
+    OUTPUT="$(build_info "$SANDBOX" "$SANDBOX" aarch64 zssh)"
     assert_eq "$(sed -n 1,2p <<<"$OUTPUT" | tr '\n' ' ')" "chezmoi unknown deploy unknown "
 }
 
@@ -542,11 +593,11 @@ test_input_stamp_follows_yupps_dir() {
     mkrepos
     mkdir -p "$dev/conf.d"
     echo 1 >"$dev/conf.d/x.zsh"
-    a="$(input_stamp "$CHEZ" "$DEP" x86_64 "$dev")"
+    a="$(input_stamp "$CHEZ" "$DEP" x86_64 zssh "$dev")"
     echo 2 >"$dev/conf.d/x.zsh"
-    b="$(input_stamp "$CHEZ" "$DEP" x86_64 "$dev")"
+    b="$(input_stamp "$CHEZ" "$DEP" x86_64 zssh "$dev")"
     [[ $a != "$b" ]] || fail "stamp ignores the yupps-zsh dir"
-    [[ $(input_stamp "$CHEZ" "$DEP" x86_64) != "$b" ]] || fail "stamp same without yupps-zsh dir"
+    [[ $(input_stamp "$CHEZ" "$DEP" x86_64 zssh) != "$b" ]] || fail "stamp same without yupps-zsh dir"
     return 0
 }
 

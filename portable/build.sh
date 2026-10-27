@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
 #
-# Build a self-contained zsh bundle for another machine.
+# Build a self-contained zsh bundle for another machine or a devcontainer.
 #
-# Usage: build.sh --arch ARCH [--chezmoi DIR] [--force] [--refresh] [--out DIR]
+# Usage: build.sh --arch ARCH [--target zssh|dev] [--chezmoi DIR] [--force] [--refresh] [--out DIR]
 #
 #   ARCH is the target's `uname -m` (aarch64, arm64, armv7l, x86_64).
-#   Prints the path of the bundle (zsh-portable-ARCH.tar.gz) on the last line
-#   of stdout; progress goes to stderr. A matching .version file holds the
+#   --target picks the bundle (default zssh): zssh is for hosts reached over
+#   ssh, dev for devcontainers. Each takes the manifest rows whose portable
+#   column lists it.
+#   Prints the path of the bundle on the last line of stdout (zssh:
+#   zsh-portable-ARCH.tar.gz, dev: zsh-portable-dev-ARCH.tar.gz); progress
+#   goes to stderr. A matching .version file holds the
 #   bundle's content hash, which zssh compares with the remote copy.
 #
 #   The bundle holds a static zsh (romkatv/zsh-bin), the zsh dotfiles from
 #   the chezmoi tree, antidote with every plugin already cloned, and the
-#   bundle=y tools of its apps/apps.tsv built for ARCH. Nothing is fetched on
+#   tools of its apps/apps.tsv whose portable column lists the target built for ARCH. Nothing is fetched on
 #   the target, so it works on hosts without internet.
 #
 #   The chezmoi tree (home/, apps/) is --chezmoi DIR, else $CHEZMOI_SRC, else
 #   the top level of `chezmoi source-path`. portable/ belongs to this repo.
 #   BUILDINFO in the bundle records the chezmoi and deploy commits (-dirty
-#   when their inputs have uncommitted changes), the arch and the build
-#   time. It is not part of the version hash.
+#   when their inputs have uncommitted changes), the arch, the target and
+#   the build time. It is not part of the version hash.
 #
 #   Secrets never go in: chezmoi runs with a throwaway config and
 #   --exclude=encrypted, only allowlisted paths are exported, and the
@@ -152,13 +156,13 @@ check_secrets() {
     return "$found"
 }
 
-# input_stamp CHEZMOI DEPLOY ARCH [YUPPS_DIR]: hash of everything that
+# input_stamp CHEZMOI DEPLOY ARCH TARGET [YUPPS_DIR]: hash of everything that
 # affects the bundle, including the yupps-zsh plugin it ships.
 input_stamp() {
-    local chezmoi=$1 deploy=$2 arch=$3 dev=${4:-} f
+    local chezmoi=$1 deploy=$2 arch=$3 target=$4 dev=${5:-} f
     local -a present=()
     {
-        echo "$arch $ZSH_BIN_TAG"
+        echo "$arch $target $ZSH_BIN_TAG"
         # Tracked files deleted in the working tree count by name only.
         while IFS= read -r -d '' f; do
             if [[ -f $chezmoi/$f ]]; then present+=("$f"); else echo "deleted $f"; fi
@@ -188,11 +192,12 @@ repo_rev() {
     echo "$sha"
 }
 
-# build_info CHEZMOI DEPLOY ARCH: the BUILDINFO text.
+# build_info CHEZMOI DEPLOY ARCH TARGET: the BUILDINFO text.
 build_info() {
     echo "chezmoi $(repo_rev "$1" home apps)"
     echo "deploy $(repo_rev "$2" portable)"
     echo "arch $3"
+    echo "target $4"
     echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
@@ -240,12 +245,12 @@ fetch_zsh() {
 }
 
 fetch_tools() {
-    local arch=$1 dest=$2
+    local arch=$1 dest=$2 target=$3
     local dir="$CACHE/tools/$arch" name release build
     mkdir -p "$dir" "$dest"
     apps_load || die "could not read the app manifest"
 
-    for name in $(apps_names --bundle); do
+    for name in $(apps_names --portable "$target"); do
         build="$(app "$name" build)"
         release="$(app "$name" release)"
         if [[ -n $REFRESH || $(elf_arch "$dir/$name" 2>/dev/null) != "$arch" ]]; then
@@ -358,17 +363,18 @@ export_dotfiles() {
 }
 
 usage() {
-    sed -n '3,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
     set -euo pipefail
 
-    local arch="" force="" out="" chezmoi=""
+    local arch="" target=zssh force="" out="" chezmoi=""
     REFRESH=""
     while (( $# )); do
         case $1 in
             --arch) arch=${2:-}; shift 2 ;;
+            --target) target=${2:-}; shift 2 ;;
             --force) force=1; shift ;;
             --refresh) REFRESH=1; force=1; shift ;;
             --out) out=${2:-}; shift 2 ;;
@@ -378,6 +384,7 @@ main() {
         esac
     done
     [[ -n $arch ]] || { usage >&2; exit 2; }
+    [[ $target == zssh || $target == dev ]] || { usage >&2; exit 2; }
     resolve_chezmoi_src "$chezmoi" || exit 2
     arch="$(normalize_arch "$arch")" || exit 1
 
@@ -387,12 +394,14 @@ main() {
     out="${out:-$CACHE/dist}"
     mkdir -p "$out"
 
-    local bundle="$out/zsh-portable-$arch.tar.gz"
-    local stamp_file="$out/zsh-portable-$arch.stamp"
-    local version_file="$out/zsh-portable-$arch.version"
+    local base="zsh-portable-$arch"
+    [[ $target == zssh ]] || base="zsh-portable-$target-$arch"
+    local bundle="$out/$base.tar.gz"
+    local stamp_file="$out/$base.stamp"
+    local version_file="$out/$base.version"
     local stamp
     YUPPS_DIR="$(yupps_dir)"
-    stamp="$(input_stamp "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$YUPPS_DIR")"
+    stamp="$(input_stamp "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$target" "$YUPPS_DIR")"
     if [[ -z $force && -s $bundle && -s $version_file \
         && $(cat "$stamp_file" 2>/dev/null) == "$stamp" ]]; then
         log "up to date: $bundle"
@@ -405,14 +414,14 @@ main() {
     trap "rm -rf '$tmp'" EXIT
     local app="$tmp/app"
 
-    log "building $arch bundle"
+    log "building $target $arch bundle"
     export_dotfiles "$app/home" "$tmp"
     local plugins="$app/home/.config/zsh/.zsh_plugins.txt"
     filter_plugins <"$plugins" >"$plugins.tmp" && mv "$plugins.tmp" "$plugins"
     fetch_git_externals "$app/home" "$tmp"
     fetch_plugins "$app/home/.config/zsh/.antidote" "$plugins" "$app/antidote"
     fetch_zsh "$arch" "$app/zsh"
-    fetch_tools "$arch" "$app/bin"
+    fetch_tools "$arch" "$app/bin" "$target"
     cp "$SCRIPT_DIR/remote/setup.sh" "$SCRIPT_DIR/remote/enter" "$app/"
     chmod +x "$app/setup.sh" "$app/enter"
 
@@ -422,7 +431,7 @@ main() {
     local version
     version="$(tree_hash "$app")"
     echo "$version" >"$app/VERSION"
-    build_info "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" >"$app/BUILDINFO"
+    build_info "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$target" >"$app/BUILDINFO"
     # Owned by root in the archive, so root unpacking it on a host doesn't
     # leave files writable by whoever has this machine's uid there.
     tar --owner=0 --group=0 --numeric-owner -czf "$bundle.tmp" -C "$app" .
