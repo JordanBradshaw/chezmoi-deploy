@@ -183,8 +183,8 @@ fixture() {
 # manifest_rows ROWS: old-style rows (name repo file assets source) as
 # apps.tsv rows, with the header; a "release" source is the "-" build column.
 manifest_rows() {
-    echo '# name tier bundle apt pacman dnf brew release file assets build'
-    printf '%s\n' "$1" | awk 'NF { b = ($5 == "release") ? "-" : $5; print $1, "-", "y", "-", "-", "-", "-", $2, $3, $4, b }'
+    echo '# name tier portable apt pacman dnf brew release file assets build'
+    printf '%s\n' "$1" | awk 'NF { b = ($5 == "release") ? "-" : $5; print $1, "-", "zssh", "-", "-", "-", "-", $2, $3, $4, b }'
 }
 
 # use_tools ROWS: a small manifest for the test (APPS_FILE) from old-style
@@ -578,9 +578,9 @@ test_help_needs_no_chezmoi_tree() {
     return 0
 }
 
-test_non_bundle_rows_ignored() {
+test_non_zssh_rows_ignored() {
     main_stubs "$RG_ONLY" "$RG_LOCK"
-    printf 'zz  -  n  -  -  -  -  x/zz  zz  -  release\n' >>"$APPS_FILE"
+    printf 'zz  -  dev  -  -  -  -  x/zz  zz  -  release\n' >>"$APPS_FILE"
     crate_fixture ripgrep 15.2.0
     run_main
     assert_eq "$STATUS" 0
