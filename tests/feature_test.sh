@@ -115,12 +115,18 @@ e2e_image() {
 
     OUTPUT=$(docker run --name "$box" -v "$FEATURE:/feature:ro" -v "$bundle_dir:/bundle:ro" "$image" sh -c '
         set -e
-        command -v curl >/dev/null && echo "curl preinstalled" || echo "no curl"
+        if command -v curl >/dev/null; then echo "CURL-PREINSTALLED"; exit 3; fi
+        echo "no curl"
         useradd -m -s /bin/bash dev
         echo "# mine" >/home/dev/.zshenv
-        chown dev:dev /home/dev/.zshenv
-        _REMOTE_USER=dev _REMOTE_USER_HOME=/home/dev \
-            BUNDLEURL=file:///bundle/zsh-portable-dev-x86_64.tar.gz sh /feature/install.sh
+        mkdir -p /home/dev/.local/share/atuin
+        echo keep >/home/dev/.local/share/atuin/marker
+        chown -R dev:dev /home/dev
+        export _REMOTE_USER=dev _REMOTE_USER_HOME=/home/dev \
+            BUNDLEURL=file:///bundle/zsh-portable-dev-x86_64.tar.gz
+        sh /feature/install.sh
+        echo "# mine 2" >/home/dev/.zshenv
+        sh /feature/install.sh
     ' 2>&1) || { fail "[$image] install.sh failed"; docker rm -f "$box" >/dev/null; return; }
     echo "    [$image] install: $(grep -c . <<<"$OUTPUT") lines, $(grep -m1 'curl' <<<"$OUTPUT")"
     docker commit "$box" "$tag" >/dev/null
@@ -136,6 +142,10 @@ e2e_image() {
     [[ $out == /usr/local/bin/zsh ]] || { fail "[$image] login shell '$out'"; ok=0; }
     check "zshenv backup" 'cat ~/.zshenv.pre-zsh-config'
     [[ $out == "# mine" ]] || { fail "[$image] zshenv backup"; ok=0; }
+    check "atuin data kept" 'cat /var/lib/zsh-config/atuin/marker; readlink ~/.local/share/atuin'
+    [[ $out == $'keep\n/var/lib/zsh-config/atuin' ]] || { fail "[$image] atuin data"; ok=0; }
+    check "both foreign zshenvs kept" 'cat ~/.zshenv.pre-zsh-config ~/.zshenv.pre-zsh-config.*'
+    [[ $out == $'# mine\n# mine 2' ]] || { fail "[$image] zshenv backups"; ok=0; }
     check "history" "zsh -i -c 'print -s hi; fc -W' >/dev/null 2>&1; test -s /var/lib/zsh-config/zsh/history && echo yes"
     [[ $out == *yes ]] || { fail "[$image] history"; ok=0; }
 
@@ -167,7 +177,7 @@ test_e2e() {
     mkdir -p "$dir"
     ln "$src" "$dir/zsh-portable-dev-x86_64.tar.gz" 2>/dev/null \
         || cp "$src" "$dir/zsh-portable-dev-x86_64.tar.gz"
-    (cd "$dir" && sha256sum zsh-portable-dev-x86_64.tar.gz >SHA256SUMS)
+    (cd "$dir" && sha256sum zsh-portable-dev-x86_64.tar.gz) >"$dir/SHA256SUMS" || fail "sha256sum"
     local image
     for image in ubuntu:24.04 debian:12; do
         e2e_image "$image" "$dir"

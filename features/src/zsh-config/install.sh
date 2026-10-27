@@ -96,9 +96,23 @@ for dir in "$b"/home/.config/* "$b"/home/.config/.[!.]*; do
     rm -rf "$home/.config/${dir##*/}"
     mv "$dir" "$home/.config/"
 done
-if [ -e "$home/.zshenv" ] && ! grep -q '>>> zsh-config >>>' "$home/.zshenv" \
-    && [ ! -e "$home/.zshenv.pre-zsh-config" ]; then
-    mv "$home/.zshenv" "$home/.zshenv.pre-zsh-config"
+# A .zshenv that isn't ours is never deleted: it goes to .zshenv.pre-zsh-config,
+# or a timestamped name when an earlier backup holds that one.
+if { [ -e "$home/.zshenv" ] || [ -L "$home/.zshenv" ]; } \
+    && ! grep -q '>>> zsh-config >>>' "$home/.zshenv" 2>/dev/null; then
+    backup=$home/.zshenv.pre-zsh-config
+    if [ -e "$backup" ] || [ -L "$backup" ]; then
+        stamped=$backup.$(date +%s)
+        backup=$stamped
+        n=0
+        while [ -e "$backup" ] || [ -L "$backup" ]; do
+            n=$((n + 1))
+            backup=$stamped.$n
+        done
+    fi
+    mv "$home/.zshenv" "$backup"
+    chown -h "$user:$group" "$backup"
+    echo "zsh-config: kept your ~/.zshenv as $backup"
 fi
 rm -f "$home/.zshenv"
 mv "$b/home/.zshenv" "$home/.zshenv"
@@ -120,7 +134,10 @@ for pair in "state/zsh:zsh" "share/atuin:atuin" "share/zoxide:zoxide"; do
     link=$home/.local/${pair%%:*}
     target=$state/${pair#*:}
     if [ -d "$link" ] && [ ! -L "$link" ]; then
-        cp -a "$link"/. "$target"/ 2>/dev/null || true
+        if ! cp -a "$link"/. "$target"/; then
+            echo "zsh-config: warning: could not copy $link to $target; left it in place" >&2
+            continue
+        fi
         rm -rf "$link"
     fi
     ln -sfn "$target" "$link"
@@ -128,7 +145,6 @@ done
 chown -R "$user:$group" "$state"
 
 chown -R -h "$user:$group" "$home/.local" "$home/.config" "$home/.cache" "$home/.zshenv"
-[ ! -e "$home/.zshenv.pre-zsh-config" ] || chown -h "$user:$group" "$home/.zshenv.pre-zsh-config"
 
 grep -qx /usr/local/bin/zsh /etc/shells 2>/dev/null || echo /usr/local/bin/zsh >>/etc/shells
 if [ "$DEFAULTSHELL" = true ]; then
