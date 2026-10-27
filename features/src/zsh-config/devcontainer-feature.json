@@ -1,0 +1,45 @@
+{
+  "id": "zsh-config",
+  "version": "1.0.0",
+  "name": "zsh-config",
+  "description": "The owner's zsh setup from a prebuilt zsh-portable dev bundle: static zsh, rendered dotfiles, pre-cloned plugins and theme, and bundled tools, installed into the remote user's home. No toolchains or caches.",
+  "documentationURL": "https://github.com/JordanBradshaw/chezmoi-deploy/tree/main/features/src/zsh-config",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "description": "latest = the rolling bundles release; else a release tag (bundle-dev-...)."
+    },
+    "bundleUrl": {
+      "type": "string",
+      "default": "",
+      "description": "Override the bundle URL (mirrors, offline, tests); SHA256SUMS is read from the same directory."
+    },
+    "defaultShell": {
+      "type": "boolean",
+      "default": true,
+      "description": "Make zsh the remote user's login shell."
+    }
+  },
+  "mounts": [
+    {
+      "source": "zsh-config-state-${devcontainerId}",
+      "target": "/var/lib/zsh-config",
+      "type": "volume"
+    }
+  ],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.profiles.linux": {
+          "zsh": {
+            "path": "/usr/local/bin/zsh",
+            "args": ["-l"]
+          }
+        },
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
+    }
+  },
+  "installsAfter": ["ghcr.io/devcontainers/features/common-utils"]
+}
