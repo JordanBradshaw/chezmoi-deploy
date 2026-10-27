@@ -42,7 +42,7 @@ jobs:
       - name: Build dev bundle
         run: |
           CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" ZSSH_YUPPS_DIR="$GITHUB_WORKSPACE/yupps-zsh" \
-            bash portable/build.sh --target dev --arch x86_64 --out "$RUNNER_TEMP/dist"
+            bash portable/build.sh --strict --target dev --arch x86_64 --out "$RUNNER_TEMP/dist"
       - name: Publish (feature e2e gate when version changed)
         env:
           PUBLISH_GATE: tests/feature_test.sh

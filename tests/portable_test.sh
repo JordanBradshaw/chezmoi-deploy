@@ -345,6 +345,39 @@ test_fetch_tools_skips_unsupported_cross_arch() {
     [[ ! -e $SANDBOX/bin/fake ]] || fail "unsupported arch produced a binary"
 }
 
+# main with a fetch_tools that, like the real one, records a tool it couldn't get.
+run_main_missing_tool() {
+    mkrepos
+    (
+        export XDG_CACHE_HOME="$SANDBOX/cache" HOME="$SANDBOX/home"
+        mkdir -p "$HOME" "$SANDBOX/noyupps"
+        fetch_zsh() { mkdir -p "$2"; echo z >"$2/zsh"; }
+        fetch_tools() { mkdir -p "$2"; MISSING_TOOLS=fake; }
+        fetch_plugins() { mkdir -p "$3"; echo p >"$3/p"; }
+        fetch_git_externals() { :; }
+        export_dotfiles() { mkdir -p "$1/.config/zsh"; echo plug >"$1/.config/zsh/.zsh_plugins.txt"; }
+        check_secrets() { return 0; }
+        yupps_dir() { echo "$SANDBOX/noyupps"; }
+        main --arch armv7l --force --chezmoi "$CHEZ" --out "$SANDBOX/o" "$@"
+    ) 2>&1
+}
+
+test_strict_fails_on_missing_tool() {
+    OUTPUT="$(run_main_missing_tool --strict)"
+    STATUS=$?
+    assert_status 1
+    assert_output_matches "build: error: missing tools: fake"
+    compgen -G "$SANDBOX/o/zsh-portable-armv7l.*" >/dev/null && fail "strict wrote bundle files"
+    return 0
+}
+
+test_nonstrict_builds_without_missing_tool() {
+    OUTPUT="$(run_main_missing_tool)"
+    STATUS=$?
+    assert_status 0
+    [[ -s $SANDBOX/o/zsh-portable-armv7l.tar.gz ]] || fail "no bundle"
+}
+
 # ---------------------------------------------------------------------------
 # setup.sh: disabling tools that can't run
 # ---------------------------------------------------------------------------

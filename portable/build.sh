@@ -2,7 +2,7 @@
 #
 # Build a self-contained zsh bundle for another machine or a devcontainer.
 #
-# Usage: build.sh --arch ARCH [--target zssh|dev] [--chezmoi DIR] [--force] [--refresh] [--out DIR]
+# Usage: build.sh --arch ARCH [--target zssh|dev] [--chezmoi DIR] [--force] [--refresh] [--strict] [--out DIR]
 #
 #   ARCH is the target's `uname -m` (aarch64, arm64, armv7l, x86_64).
 #   --target picks the bundle (default zssh): zssh is for hosts reached over
@@ -33,6 +33,11 @@
 #   apps/ (chezmoi tree) or portable/ (this repo) change, or the yupps-zsh
 #   plugin it ships does (this machine's ~/.config/zsh/plugins/yupps-zsh, or
 #   $ZSSH_YUPPS_DIR). --force rebuilds anyway; --refresh also re-downloads zsh, tools and plugins.
+#
+#   A tool with no build for ARCH is skipped with a warning. --strict makes
+#   that an error instead: after all tools are tried, the build fails with
+#   one message listing every missing tool and writes no bundle, version or
+#   stamp. Publishing uses it so an incomplete bundle never ships.
 #
 #   Caches live in ${XDG_CACHE_HOME:-~/.cache}/zsh-portable.
 
@@ -247,6 +252,7 @@ fetch_zsh() {
 fetch_tools() {
     local arch=$1 dest=$2 target=$3
     local dir="$CACHE/tools/$arch" name release build
+    MISSING_TOOLS=""
     mkdir -p "$dir" "$dest"
     apps_load || die "could not read the app manifest"
 
@@ -272,6 +278,7 @@ fetch_tools() {
             fi
             if [[ -z $ok ]]; then
                 log "warning: no $arch build of $name (${build/#-/$release}), skipping"
+                MISSING_TOOLS+="${MISSING_TOOLS:+ }$name"
                 continue
             fi
             log "fetched $name for $arch"
@@ -363,20 +370,22 @@ export_dotfiles() {
 }
 
 usage() {
-    sed -n '3,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
     set -euo pipefail
 
-    local arch="" target=zssh force="" out="" chezmoi=""
+    local arch="" target=zssh force="" out="" chezmoi="" strict=""
     REFRESH=""
+    MISSING_TOOLS=""
     while (( $# )); do
         case $1 in
             --arch) arch=${2:-}; shift 2 ;;
             --target) target=${2:-}; shift 2 ;;
             --force) force=1; shift ;;
             --refresh) REFRESH=1; force=1; shift ;;
+            --strict) strict=1; shift ;;
             --out) out=${2:-}; shift 2 ;;
             --chezmoi) chezmoi=${2:-}; shift 2 ;;
             -h | --help) usage; exit 0 ;;
@@ -422,6 +431,7 @@ main() {
     fetch_plugins "$app/home/.config/zsh/.antidote" "$plugins" "$app/antidote"
     fetch_zsh "$arch" "$app/zsh"
     fetch_tools "$arch" "$app/bin" "$target"
+    [[ -z $strict || -z $MISSING_TOOLS ]] || die "missing tools: $MISSING_TOOLS"
     cp "$SCRIPT_DIR/remote/setup.sh" "$SCRIPT_DIR/remote/enter" "$app/"
     chmod +x "$app/setup.sh" "$app/enter"
 
