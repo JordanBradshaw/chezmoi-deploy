@@ -39,6 +39,16 @@ jobs:
         with:
           repository: JordanBradshaw/yupps-zsh
           path: yupps-zsh
+      # static:/cross: builds (static/NAME.sh in the zsh-builder image) are
+      # slow; build.sh rebuilds one whenever its recipe changes.
+      - name: Cache source-built tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zsh-portable/built
+            ~/.cache/zsh-portable/static-src
+          key: built-x86_64-${{ hashFiles('portable/static/**', 'portable/cross/**') }}
+          restore-keys: built-x86_64-
       - name: Build dev bundle
         run: |
           CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" ZSSH_YUPPS_DIR="$GITHUB_WORKSPACE/yupps-zsh" \

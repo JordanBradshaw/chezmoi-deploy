@@ -28,6 +28,8 @@ jobs:
         run: CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" bash tests/build_tools_test.sh
       - name: portable_test
         run: CHEZMOI_SRC="$GITHUB_WORKSPACE/chezmoi" bash tests/portable_test.sh
+      - name: static_test
+        run: bash tests/static_test.sh
       - name: lock_diff_test
         run: bash tests/lock_diff_test.sh
       - name: publish_release_test

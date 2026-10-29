@@ -20,7 +20,7 @@ FAIL=0
 setup() {
     SANDBOX="$(mktemp -d)"
     export SANDBOX
-    unset APPS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
+    unset APPS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR STATIC_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
         STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF
     OUTPUT=""
     STATUS=0
@@ -256,6 +256,13 @@ test_cross_version_is_recipe() {
     assert_eq "$(cat "$STUB_LOG")" ""
 }
 
+test_static_version_is_recipe() {
+    stubs_setup
+    btp 'latest_version static:ss -'
+    assert_eq "$OUTPUT" "recipe"
+    assert_eq "$(cat "$STUB_LOG")" ""
+}
+
 test_locked_makes_no_lookups() {
     stubs_setup
     use_tools "$TWO_TOOLS"
@@ -483,6 +490,21 @@ test_cross_needs_sdk_profile() {
     assert_eq "$STATUS" 0
     grep -qx "cross aarch64 $SANDBOX/out/tmux" "$STUB_LOG" || fail "cross call: $(cat "$STUB_LOG")"
     return 0
+}
+
+# static: recipes build anywhere zig is (no SDK), for the profile's arch.
+test_static_recipe_runs_script() {
+    recipe_stubs
+    export STATIC_DIR="$SANDBOX/static"
+    mkdir -p "$STATIC_DIR"
+    printf '#!/usr/bin/env bash\necho "static $* token=${EGET_GITHUB_TOKEN:-}" >>"$STUB_LOG"\nprintf x >"$2"\n' >"$STATIC_DIR/ss.sh"
+    chmod +x "$STATIC_DIR/ss.sh"
+    EGET_GITHUB_TOKEN=s3cret btp 'load_profile x86_64-v3; build_recipe ss static:ss - - - recipe "$SANDBOX/out/ss"'
+    assert_eq "$STATUS" 0
+    btp 'load_profile qos-orin; build_recipe ss static:ss - - - recipe "$SANDBOX/out/ss"'
+    assert_eq "$STATUS" 0
+    assert_eq "$(cat "$STUB_LOG")" "static x86_64 $SANDBOX/out/ss token=
+static aarch64 $SANDBOX/out/ss token="
 }
 
 test_release_passes_tag() {
@@ -814,7 +836,7 @@ f = json.load(open(sys.argv[1]))
 print(f["id"], f["version"], f["options"]["rustTargets"]["default"], f["options"]["goVersion"]["default"])
 EOF
 )"
-    assert_eq "$OUTPUT" "zsh-builder 0.1.0 x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu latest"
+    assert_eq "$OUTPUT" "zsh-builder 0.2.0 x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu latest"
 }
 
 # The Dockerfile route doesn't apply containerEnv, so it sets the same ENV.
@@ -975,6 +997,23 @@ test_cross_script_in_recipe_hash() {
     printf 'TMUX_VERSION=3.6\n' >"$CROSS_DIR/tmux.sh"
     btp 'load_profile qos-orin; load_tools; recipe_hash tmux'
     [[ -n $a && $a != "$OUTPUT" ]] || fail "hash unchanged: $a"
+    return 0
+}
+
+test_static_scripts_in_recipe_hash() {
+    main_stubs 'ss  -  -  -  static:ss'
+    export STATIC_DIR="$SANDBOX/static"
+    mkdir -p "$STATIC_DIR"
+    printf 'IPROUTE2_VERSION=7.3.0\n' >"$STATIC_DIR/ss.sh"
+    printf '# helpers\n' >"$STATIC_DIR/lib.sh"
+    btp 'load_profile x86_64-v3; load_tools; recipe_hash ss'
+    local a=$OUTPUT
+    printf 'IPROUTE2_VERSION=7.4.0\n' >"$STATIC_DIR/ss.sh"
+    btp 'load_profile x86_64-v3; load_tools; recipe_hash ss'
+    local b=$OUTPUT
+    printf '# helpers 2\n' >"$STATIC_DIR/lib.sh"
+    btp 'load_profile x86_64-v3; load_tools; recipe_hash ss'
+    [[ -n $a && $a != "$b" && $b != "$OUTPUT" ]] || fail "hash unchanged: $a $b $OUTPUT"
     return 0
 }
 

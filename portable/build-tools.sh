@@ -13,6 +13,8 @@
 #     crate:CRATE[:BIN][:ARGS]  cargo zigbuild from the crates.io source
 #     go:MODULE[//SUBPKG]       go install for the profile's GOARCH
 #     cross:NAME                cross/NAME.sh (needs the Yocto SDK)
+#     static:NAME               static/NAME.sh: a static musl build from
+#                               source with zig cc (needs bison for ss)
 #     release                   the upstream release, with eget
 #
 #   Versions come from the chezmoi tree's apps/locks/NAME.lock. --locked
@@ -33,6 +35,7 @@ PROFILES_DIR="$PORTABLE_DIR/profiles"
 USER_APPS_FILE=${APPS_FILE:-}
 USER_LOCKS_DIR=${LOCKS_DIR:-}
 CROSS_DIR=${CROSS_DIR:-$PORTABLE_DIR/cross}
+STATIC_DIR=${STATIC_DIR:-$PORTABLE_DIR/static}
 CACHE_ROOT=${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}
 
 # shellcheck source=lib.sh
@@ -167,7 +170,7 @@ latest_version() {
             fi
             echo "$version"
             ;;
-        cross:*)
+        cross:* | static:*)
             echo recipe
             ;;
         release)
@@ -327,6 +330,9 @@ build_recipe() {
             fi
             env -u EGET_GITHUB_TOKEN "$CROSS_DIR/${source#cross:}.sh" "$PROFILE_ARCH" "$out" </dev/null >&2
             ;;
+        static:*)
+            env -u EGET_GITHUB_TOKEN "$STATIC_DIR/${source#static:}.sh" "$PROFILE_ARCH" "$out" </dev/null >&2
+            ;;
         release) fetch_release "$name" "$repo" "$file" "$spec" "$PROFILE_ARCH" "$out" "$version" ;;
         *) log "$name: unknown source $source"; return 1 ;;
     esac
@@ -358,7 +364,7 @@ verify_binary() {
 BUILD_SETTINGS="cargo: lto=fat codegen-units=1 strip=symbols; go: -trimpath -ldflags=-s -w"
 
 # recipe_hash NAME: short hash of NAME's manifest fields, the profile,
-# BUILD_SETTINGS and (cross recipes) the recipe scripts, so a changed recipe
+# BUILD_SETTINGS and (cross and static recipes) the recipe scripts, so a changed recipe
 # never reuses an old build.
 recipe_hash() {
     {
@@ -367,6 +373,9 @@ recipe_hash() {
         # A cross recipe's version lives in its script (and the SDK helpers).
         if [[ ${SOURCES[$1]} == cross:* ]]; then
             cat "$CROSS_DIR/${SOURCES[$1]#cross:}.sh" "$CROSS_DIR/lib.sh" "$CROSS_DIR/sdk.sh" 2>/dev/null || true
+        elif [[ ${SOURCES[$1]} == static:* ]]; then
+            cat "$STATIC_DIR/${SOURCES[$1]#static:}.sh" "$STATIC_DIR/lib.sh" \
+                "$STATIC_DIR/patches/${SOURCES[$1]#static:}"/* 2>/dev/null || true
         fi
     } | sha256sum | cut -c1-12
 }

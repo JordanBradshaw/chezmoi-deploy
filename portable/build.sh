@@ -249,25 +249,52 @@ fetch_zsh() {
     done
 }
 
+# recipe_stamp KIND NAME: hash of the scripts that build NAME from source
+# (KIND/NAME.sh, the KIND helpers and KIND/patches/NAME/), so a changed
+# recipe rebuilds the cached binary.
+recipe_stamp() {
+    local kind=$1 name=$2 f
+    for f in "$SCRIPT_DIR/$kind/$name.sh" "$SCRIPT_DIR/$kind/lib.sh" "$SCRIPT_DIR/$kind/sdk.sh" \
+        "$SCRIPT_DIR/$kind/patches/$name"/*; do
+        if [[ -f $f ]]; then
+            printf '%s\n' "${f#"$SCRIPT_DIR/"}"
+            cat "$f"
+        fi
+    done | sha256sum | cut -c1-16
+}
+
+# fetch_tools ARCH DEST TARGET: put the TARGET bundle's tools for ARCH in
+# DEST, from the per-arch cache when still valid. cross: and static: rows
+# run cross/NAME.sh or static/NAME.sh ARCH OUT, which fail for arches they
+# can't build, and are cached in built/ARCH with their recipe_stamp (CI
+# caches that dir); the rest come from their release, cached in tools/ARCH.
+# Tools that can't be had are warned about and listed in MISSING_TOOLS.
 fetch_tools() {
     local arch=$1 dest=$2 target=$3
-    local dir="$CACHE/tools/$arch" name release build
+    local dir name release build kind stamp
     MISSING_TOOLS=""
-    mkdir -p "$dir" "$dest"
+    mkdir -p "$dest"
     apps_load || die "could not read the app manifest"
 
     for name in $(apps_names --portable "$target"); do
         build="$(app "$name" build)"
         release="$(app "$name" release)"
-        if [[ -n $REFRESH || $(elf_arch "$dir/$name" 2>/dev/null) != "$arch" ]]; then
-            rm -f "$dir/$name"
+        kind="" stamp="" dir="$CACHE/tools/$arch"
+        if [[ $build == cross:* || $build == static:* ]]; then
+            kind=${build%%:*}
+            stamp="$(recipe_stamp "$kind" "${build#*:}")"
+            dir="$CACHE/built/$arch"
+        fi
+        mkdir -p "$dir"
+        if [[ -n $REFRESH || $(elf_arch "$dir/$name" 2>/dev/null) != "$arch" ]] \
+            || [[ -n $kind && $(cat "$dir/$name.recipe" 2>/dev/null) != "$stamp" ]]; then
+            rm -f "$dir/$name" "$dir/$name.recipe"
             local ok=""
-            if [[ $build == cross:* ]]; then
-                # Built from source by cross/NAME.sh ARCH OUT, which fails
-                # for arches it can't build.
+            if [[ -n $kind ]]; then
                 log "building $name for $arch"
-                if "$SCRIPT_DIR/cross/${build#cross:}.sh" "$arch" "$dir/$name" </dev/null >&2 \
+                if "$SCRIPT_DIR/$kind/${build#*:}.sh" "$arch" "$dir/$name" </dev/null >&2 \
                     && [[ $(elf_arch "$dir/$name") == "$arch" ]]; then
+                    echo "$stamp" >"$dir/$name.recipe"
                     ok=1
                 else
                     rm -f "$dir/$name"

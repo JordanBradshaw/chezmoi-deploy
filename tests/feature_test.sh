@@ -133,6 +133,11 @@ e2e_image() {
     docker rm -f "$box" >/dev/null
 
     check "lsd --version" '~/.local/bin/lsd --version' || { fail "[$image] lsd"; ok=0; }
+    # Bundled static builds (static:NAME rows); the base images have neither.
+    check "ss and lsof" '~/.local/bin/ss -tln && ~/.local/bin/lsof -v 2>&1 | grep -m1 revision' \
+        || { fail "[$image] ss/lsof: $out"; ok=0; }
+    check "ss and lsof completion" "zsh -i -c 'print -l \${^fpath}/_(ss|lsof)(N:t)'"
+    [[ $out == $'_lsof\n_ss' ]] || { fail "[$image] completion '$out'"; ok=0; }
     check "zsh -i offline" "zsh -i -c 'print -r -- \$ZSH_PORTABLE; echo ok'"
     [[ $rc -eq 0 && $out == *ok* ]] || { fail "[$image] zsh -i"; ok=0; }
     [[ $out != *"Cloning"* && $out != *"Installing"* ]] || { fail "[$image] tried network"; ok=0; }

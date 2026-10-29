@@ -267,7 +267,7 @@ fake_cross_env() {
 test_fetch_tools_runs_cross_script() {
     fake_cross_env
     OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh 2>&1)"
-    assert_call_matches "^cross aarch64 $CACHE/tools/aarch64/fake$"
+    assert_call_matches "^cross aarch64 $CACHE/built/aarch64/fake$"
     assert_eq "$(elf_arch "$SANDBOX/bin/fake")" aarch64
 }
 
@@ -343,6 +343,88 @@ test_fetch_tools_skips_unsupported_cross_arch() {
     OUTPUT="$(fetch_tools armv7l "$SANDBOX/bin" zssh 2>&1)"
     assert_output_matches "no armv7l build of fake"
     [[ ! -e $SANDBOX/bin/fake ]] || fail "unsupported arch produced a binary"
+}
+
+# ---------------------------------------------------------------------------
+# Static musl builds from source
+# ---------------------------------------------------------------------------
+
+# fake_static_env: a manifest with one static: row and a static script that
+# writes an ELF for x86_64 or aarch64 and fails for other arches.
+fake_static_env() {
+    SCRIPT_DIR="$SANDBOX/portable"
+    CACHE="$SANDBOX/cache"
+    REFRESH=""
+    mkdir -p "$SCRIPT_DIR/static"
+    APPS_FILE="$SANDBOX/apps.tsv"
+    {
+        echo '# name tier portable apt pacman dnf brew release file assets build'
+        echo 'fake extra zssh,dev fake - - - - - - static:fake'
+    } >"$APPS_FILE"
+    {
+        echo '#!/usr/bin/env bash'
+        echo "echo \"static \$*\" >>\"$STUB_LOG\""
+        declare -f fake_elf
+        echo 'case $1 in x86_64) fake_elf "$2" 2 62 ;; aarch64) fake_elf "$2" 2 183 ;; *) exit 1 ;; esac'
+    } >"$SCRIPT_DIR/static/fake.sh"
+    echo '# shared' >"$SCRIPT_DIR/static/lib.sh"
+    chmod +x "$SCRIPT_DIR/static/fake.sh"
+}
+
+test_fetch_tools_runs_static_script() {
+    fake_static_env
+    OUTPUT="$(fetch_tools x86_64 "$SANDBOX/bin" dev 2>&1)"
+    assert_call_matches "^static x86_64 $CACHE/built/x86_64/fake$"
+    assert_eq "$(elf_arch "$SANDBOX/bin/fake")" x86_64
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/abin" zssh 2>&1)"
+    assert_eq "$(elf_arch "$SANDBOX/abin/fake")" aarch64
+}
+
+test_fetch_tools_reuses_static_build() {
+    fake_static_env
+    fetch_tools x86_64 "$SANDBOX/bin" dev >/dev/null 2>&1
+    : >"$STUB_LOG"
+    fetch_tools x86_64 "$SANDBOX/bin2" dev >/dev/null 2>&1
+    refute_call_matches "^static"
+    [[ -x $SANDBOX/bin2/fake ]] || fail "cached build not copied"
+}
+
+test_fetch_tools_rebuilds_when_static_script_changes() {
+    fake_static_env
+    fetch_tools x86_64 "$SANDBOX/bin" dev >/dev/null 2>&1
+    : >"$STUB_LOG"
+    echo '# FAKE_VERSION=2' >>"$SCRIPT_DIR/static/fake.sh"
+    fetch_tools x86_64 "$SANDBOX/bin2" dev >/dev/null 2>&1
+    assert_call_matches "^static x86_64 "
+}
+
+test_fetch_tools_rebuilds_when_static_lib_changes() {
+    fake_static_env
+    fetch_tools x86_64 "$SANDBOX/bin" dev >/dev/null 2>&1
+    : >"$STUB_LOG"
+    echo '# changed' >>"$SCRIPT_DIR/static/lib.sh"
+    fetch_tools x86_64 "$SANDBOX/bin2" dev >/dev/null 2>&1
+    assert_call_matches "^static x86_64 "
+}
+
+test_fetch_tools_rebuilds_when_static_patch_changes() {
+    fake_static_env
+    mkdir -p "$SCRIPT_DIR/static/patches/fake"
+    echo a >"$SCRIPT_DIR/static/patches/fake/fix.patch"
+    fetch_tools x86_64 "$SANDBOX/bin" dev >/dev/null 2>&1
+    : >"$STUB_LOG"
+    echo b >"$SCRIPT_DIR/static/patches/fake/fix.patch"
+    fetch_tools x86_64 "$SANDBOX/bin2" dev >/dev/null 2>&1
+    assert_call_matches "^static x86_64 "
+}
+
+test_fetch_tools_reports_failed_static_build() {
+    fake_static_env
+    fetch_tools armv7l "$SANDBOX/bin" dev >"$SANDBOX/out" 2>&1
+    OUTPUT="$(cat "$SANDBOX/out")"
+    assert_output_matches "no armv7l build of fake \(static:fake\)"
+    assert_eq "$MISSING_TOOLS" fake
+    [[ ! -e $CACHE/built/armv7l/fake ]] || fail "failed build cached"
 }
 
 # main with a fetch_tools that, like the real one, records a tool it couldn't get.
