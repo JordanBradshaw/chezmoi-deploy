@@ -3,7 +3,8 @@
 # zsh-builder devcontainer feature: the toolchains build-tools.sh needs.
 # Runs as root at image build. Options arrive as RUSTTARGETS and GOVERSION.
 #
-#   apt packages  compilers, pkg-config, python3, binutils (readelf), git
+#   apt packages  compilers, pkg-config, python3, binutils (readelf), git,
+#                 bison (static ss)
 #   rustup        stable, minimal profile, plus RUSTTARGETS, in
 #                 /usr/local/{cargo,rustup}
 #   zig           newest stable release, /usr/local/zig
@@ -22,7 +23,7 @@ echo "zsh-builder: packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential pkg-config git curl ca-certificates xz-utils python3 binutils file rsync
+    build-essential pkg-config git curl ca-certificates xz-utils python3 binutils file rsync bison
 rm -rf /var/lib/apt/lists/*
 
 case "$(dpkg --print-architecture)" in
