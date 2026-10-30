@@ -14,7 +14,7 @@
 #     go:MODULE[//SUBPKG]       go install for the profile's GOARCH
 #     cross:NAME                cross/NAME.sh (needs the Yocto SDK)
 #     static:NAME               static/NAME.sh: a static musl build from
-#                               source with zig cc (needs bison for ss)
+#                               source with zig cc (needs bison and flex)
 #     release                   the upstream release, with eget
 #
 #   Versions come from the chezmoi tree's apps/locks/NAME.lock. --locked
@@ -374,7 +374,7 @@ recipe_hash() {
         if [[ ${SOURCES[$1]} == cross:* ]]; then
             cat "$CROSS_DIR/${SOURCES[$1]#cross:}.sh" "$CROSS_DIR/lib.sh" "$CROSS_DIR/sdk.sh" 2>/dev/null || true
         elif [[ ${SOURCES[$1]} == static:* ]]; then
-            cat "$STATIC_DIR/${SOURCES[$1]#static:}.sh" "$STATIC_DIR/lib.sh" \
+            cat "$STATIC_DIR/${SOURCES[$1]#static:}.sh" "$STATIC_DIR/lib.sh" "$STATIC_DIR/deps.sh" \
                 "$STATIC_DIR/patches/${SOURCES[$1]#static:}"/* 2>/dev/null || true
         fi
     } | sha256sum | cut -c1-12
