@@ -273,9 +273,18 @@ test_recipes_pin_sources() {
         grep -q 'static_run ' "$r" || fail "${r##*/}: no static_run"
         [[ -x $r ]] || fail "${r##*/}: not executable"
     done
-    for r in ss lsof nethogs iftop below; do
+    for r in ss nstat lsof nethogs iftop below; do
         [[ -f $REPO_DIR/portable/static/$r.sh ]] || fail "missing recipe $r"
     done
+}
+
+# ss and nstat both come from iproute2: same pinned tarball.
+test_iproute2_recipes_agree() {
+    local a b
+    a="$(grep -E '^IPROUTE2_(VERSION|SHA256)=' "$REPO_DIR/portable/static/ss.sh")"
+    b="$(grep -E '^IPROUTE2_(VERSION|SHA256)=' "$REPO_DIR/portable/static/nstat.sh" 2>/dev/null)"
+    [[ -n $a ]] || fail "ss.sh pins nothing"
+    assert_eq "$b" "$a"
 }
 
 test_below_has_no_armv7l() {
@@ -316,6 +325,8 @@ test_e2e_x86_64() {
     e2e_check x86_64 linux/amd64 ss -tln
     e2e_check x86_64 linux/amd64 lsof -v
     e2e_check x86_64 linux/amd64 lsof -p 1
+    e2e_check x86_64 linux/amd64 nstat -V
+    e2e_check x86_64 linux/amd64 nstat -az
     e2e_check x86_64 linux/amd64 nethogs -V
     e2e_check x86_64 linux/amd64 iftop -h
     E2E_DOCKER_ARGS="--cap-add NET_ADMIN --cap-add NET_RAW" e2e_check x86_64 linux/amd64 iftop -t -s 1 -n
@@ -330,6 +341,7 @@ test_e2e_aarch64() {
     # qemu-user has no netlink, so ss can only print its version.
     e2e_check aarch64 linux/arm64 ss -V
     e2e_check aarch64 linux/arm64 lsof -v
+    e2e_check aarch64 linux/arm64 nstat -V
     e2e_check aarch64 linux/arm64 nethogs -V
     e2e_check aarch64 linux/arm64 iftop -h
     e2e_check aarch64 linux/arm64 below --help
@@ -342,6 +354,7 @@ test_e2e_armv7l() {
     fi
     e2e_check armv7l linux/arm/v7 ss -V
     e2e_check armv7l linux/arm/v7 lsof -v
+    e2e_check armv7l linux/arm/v7 nstat -V
     e2e_check armv7l linux/arm/v7 nethogs -V
     e2e_check armv7l linux/arm/v7 iftop -h
 }
