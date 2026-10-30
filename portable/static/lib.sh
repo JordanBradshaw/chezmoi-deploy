@@ -9,6 +9,11 @@
 # (STATIC_IMAGE, default ghcr.io/jordanbradshaw/zsh-builder:latest), which
 # apt-installs any missing STATIC_TOOLS first. STATIC_NATIVE=1 or 0 forces
 # one or the other.
+#
+# A recipe that sets STATIC_ALPINE=1 (Rust with C libraries only Alpine
+# ships static, like below's libelf) always runs in STATIC_ALPINE_IMAGE for
+# the target's platform, emulated with qemu binfmt for other arches; it
+# apk-installs bash, binutils and STATIC_APK first.
 
 STATIC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATIC_SRC="${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}/static-src"
@@ -25,6 +30,18 @@ static_target() {
         x86_64) echo x86_64-linux-musl ;;
         aarch64) echo aarch64-linux-musl ;;
         armv7l) echo arm-linux-musleabihf ;;
+        *) echo "${0##*/}: no static build for $1" >&2; return 1 ;;
+    esac
+}
+
+STATIC_ALPINE_IMAGE=${STATIC_ALPINE_IMAGE:-rust:1.91-alpine3.22}
+
+# static_platform ARCH: the docker platform for a bundle arch.
+static_platform() {
+    case $1 in
+        x86_64) echo linux/amd64 ;;
+        aarch64) echo linux/arm64 ;;
+        armv7l) echo linux/arm/v7 ;;
         *) echo "${0##*/}: no static build for $1" >&2; return 1 ;;
     esac
 }
@@ -56,7 +73,8 @@ static_fetch_libpcap() {
 }
 
 # The bash that runs a recipe (on stdin) in a temp dir, then checks that it
-# left a static binary at OUT_FILE. Recipes get TARGET, CC, CXX, AR, RANLIB,
+# left a static binary at OUT_FILE. Recipes get TARGET, CC, CXX, AR, RANLIB
+# (zig; not for STATIC_ALPINE),
 # SRC (the sources), PATCHES (static/patches), DEPS (deps.sh, to source),
 # NCURSES_VERSION, LIBPCAP_VERSION, JOBS, OUT_FILE and their own variables, and `quiet CMD...`, which shows CMD's output only if it fails.
 # shellcheck disable=SC2016 # expanded by the inner bash
@@ -101,6 +119,7 @@ chmod 755 "$OUT_FILE"
 
 # static_native: whether to build here rather than in docker.
 static_native() {
+    [[ -z ${STATIC_ALPINE:-} ]] || return 1
     case ${STATIC_NATIVE:-} in
         1) return 0 ;;
         0) return 1 ;;
@@ -121,11 +140,12 @@ static_run() {
     mkdir -p "$(dirname "$out")" "$STATIC_SRC"
     outdir="$(cd "$(dirname "$out")" && pwd)"
     local -a env=(
-        "TARGET=$target" "CC=zig cc -target $target" "CXX=zig c++ -target $target"
-        "AR=zig ar" "RANLIB=zig ranlib"
-        "NCURSES_VERSION=$NCURSES_VERSION" "LIBPCAP_VERSION=$LIBPCAP_VERSION"
+        "TARGET=$target" "NCURSES_VERSION=$NCURSES_VERSION" "LIBPCAP_VERSION=$LIBPCAP_VERSION"
         "JOBS=$(nproc 2>/dev/null || echo 4)" "STATIC_TOOLS=${STATIC_TOOLS:-}" "$@"
     )
+    # Alpine builds use its native toolchain.
+    [[ -n ${STATIC_ALPINE:-} ]] ||
+        env+=("CC=zig cc -target $target" "CXX=zig c++ -target $target" "AR=zig ar" "RANLIB=zig ranlib")
     if static_native; then
         (
             for var in "${env[@]}" "SRC=$STATIC_SRC" "PATCHES=$STATIC_DIR/patches" "DEPS=$STATIC_DIR/deps.sh" "OUT_FILE=$outdir/${out##*/}"; do
@@ -136,11 +156,19 @@ static_run() {
     else
         local -a args=()
         for var in "${env[@]}" "SRC=/src" "PATCHES=/static/patches" "DEPS=/static/deps.sh" "OUT_FILE=/out/${out##*/}" \
-            "STATIC_APT=1" "OWNER=$(id -u):$(id -g)"; do
+            "OWNER=$(id -u):$(id -g)"; do
             args+=(-e "$var")
         done
-        docker run --rm -i "${args[@]}" \
-            -v "$STATIC_SRC:/src:ro" -v "$STATIC_DIR:/static:ro" -v "$outdir:/out" \
-            "${STATIC_IMAGE:-ghcr.io/jordanbradshaw/zsh-builder:latest}" bash -c "$STATIC_RUNNER"
+        args+=(-v "$STATIC_SRC:/src:ro" -v "$STATIC_DIR:/static:ro" -v "$outdir:/out")
+        if [[ -n ${STATIC_ALPINE:-} ]]; then
+            local platform
+            platform="$(static_platform "$arch")" || return 1
+            # shellcheck disable=SC2016 # expanded in the container
+            docker run --rm -i --platform "$platform" "${args[@]}" -e STATIC_RUNNER="$STATIC_RUNNER" \
+                "$STATIC_ALPINE_IMAGE" sh -c "apk add -q bash binutils ${STATIC_APK:-} >/dev/null && exec bash -c \"\$STATIC_RUNNER\""
+        else
+            docker run --rm -i "${args[@]}" -e STATIC_APT=1 \
+                "${STATIC_IMAGE:-ghcr.io/jordanbradshaw/zsh-builder:latest}" bash -c "$STATIC_RUNNER"
+        fi
     fi
 }

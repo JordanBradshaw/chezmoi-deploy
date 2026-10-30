@@ -1,0 +1,25 @@
+--- fb_procfs-0.9.0/src/lib.rs
++++ fb_procfs-0.9.0/src/lib.rs
+@@ -834,17 +834,12 @@
+             match self.read_pid_io_from_path(entry.path()) {
+                 Err(Error::IoError(_, ref e))
+                     if e.raw_os_error().map_or(false, |ec| {
+-                        ec == 2 || ec == 3 /* ENOENT or ESRCH */
+-                    }) =>
+-                {
+-                    continue;
+-                }
+-                Err(Error::IoError(_, ref e))
+-                    if e.raw_os_error().map_or(false, |ec| {
+                         /* EACCES (b/c /proc/pid/io requires elevated
+-                         * perms due to security concerns). Just leave
+-                         * io info empty */
+-                        ec == 13
++                         * perms due to security concerns), or ENOENT/ESRCH:
++                         * kernels without CONFIG_TASK_IO_ACCOUNTING have no
++                         * /proc/pid/io (a gone process fails the next read).
++                         * Just leave io info empty */
++                        ec == 13 || ec == 2 || ec == 3
+                     }) => {}
+                 res => pidinfo.io = res?,
+             }

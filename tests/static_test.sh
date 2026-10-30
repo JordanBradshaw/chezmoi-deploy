@@ -27,7 +27,7 @@ setup() {
     for tool in cat chmod chown cp cut dirname grep head id install mkdir mktemp mv nproc readelf rm sed sh sha256sum tail tar tr; do
         ln -s "$(command -v "$tool")" "$STUBS/$tool"
     done
-    unset STATIC_IMAGE STATIC_NATIVE STATIC_TOOLS XDG_CACHE_HOME
+    unset STATIC_IMAGE STATIC_NATIVE STATIC_TOOLS STATIC_ALPINE STATIC_APK XDG_CACHE_HOME
     export ZSH_PORTABLE_CACHE="$SANDBOX/cache"
     OUTPUT=""
     STATUS=0
@@ -233,6 +233,31 @@ test_auto_mode_uses_docker_without_tools() {
     grep -q '^docker run' "$STUB_LOG" || fail "docker not used without bison"
 }
 
+# Recipes needing a native musl toolchain (below: Rust plus Alpine's static
+# libelf) run in rust:alpine for the target platform, never natively.
+test_alpine_run_uses_target_platform() {
+    stub_docker
+    stub zig 'exit 0'
+    sl "STATIC_NATIVE=1 STATIC_ALPINE=1 STATIC_APK='clang llvm' static_run aarch64 '$SANDBOX/out/tool' FOO=bar <<'EOF'
+echo the-recipe
+EOF"
+    local call
+    call="$(cat "$STUB_LOG")"
+    [[ $call == *"--platform linux/arm64"* ]] || fail "no platform: $call"
+    [[ $call == *" rust:"*"-alpine"*" sh -c "* ]] || fail "not rust alpine: $call"
+    [[ $call == *"apk add"*"bash binutils clang llvm"* ]] || fail "no apk add: $call"
+    [[ $call == *"-e FOO=bar"* && $call == *"-e OUT_FILE=/out/tool"* ]] || fail "env: $call"
+    [[ $call != *"-e CC="* ]] || fail "zig CC passed to Alpine: $call"
+    grep -q '^echo the-recipe$' "$SANDBOX/docker-stdin" || fail "recipe not on stdin"
+}
+
+test_alpine_platforms() {
+    sl 'static_platform x86_64; static_platform aarch64; static_platform armv7l'
+    assert_eq "$OUTPUT" "linux/amd64
+linux/arm64
+linux/arm/v7"
+}
+
 # ---------------------------------------------------------------------------
 # Recipes
 # ---------------------------------------------------------------------------
@@ -248,9 +273,16 @@ test_recipes_pin_sources() {
         grep -q 'static_run ' "$r" || fail "${r##*/}: no static_run"
         [[ -x $r ]] || fail "${r##*/}: not executable"
     done
-    for r in ss lsof nethogs iftop; do
+    for r in ss lsof nethogs iftop below; do
         [[ -f $REPO_DIR/portable/static/$r.sh ]] || fail "missing recipe $r"
     done
+}
+
+test_below_has_no_armv7l() {
+    OUTPUT="$("$REPO_DIR/portable/static/below.sh" armv7l "$SANDBOX/below" 2>&1)"
+    STATUS=$?
+    [[ $STATUS -ne 0 ]] || fail "armv7l accepted"
+    assert_output_matches "no static build for armv7l"
 }
 
 test_recipe_rejects_unknown_arch() {
@@ -287,6 +319,7 @@ test_e2e_x86_64() {
     e2e_check x86_64 linux/amd64 nethogs -V
     e2e_check x86_64 linux/amd64 iftop -h
     E2E_DOCKER_ARGS="--cap-add NET_ADMIN --cap-add NET_RAW" e2e_check x86_64 linux/amd64 iftop -t -s 1 -n
+    e2e_check x86_64 linux/amd64 below --help
 }
 
 test_e2e_aarch64() {
@@ -299,6 +332,7 @@ test_e2e_aarch64() {
     e2e_check aarch64 linux/arm64 lsof -v
     e2e_check aarch64 linux/arm64 nethogs -V
     e2e_check aarch64 linux/arm64 iftop -h
+    e2e_check aarch64 linux/arm64 below --help
 }
 
 test_e2e_armv7l() {
