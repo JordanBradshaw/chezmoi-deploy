@@ -427,6 +427,83 @@ test_fetch_tools_reports_failed_static_build() {
     [[ ! -e $CACHE/built/armv7l/fake ]] || fail "failed build cached"
 }
 
+test_static_stamp_covers_deps() {
+    fake_static_env
+    fetch_tools x86_64 "$SANDBOX/bin" dev >/dev/null 2>&1
+    : >"$STUB_LOG"
+    echo '# ncurses 7' >"$SCRIPT_DIR/static/deps.sh"
+    fetch_tools x86_64 "$SANDBOX/bin2" dev >/dev/null 2>&1
+    assert_call_matches "^static x86_64 "
+}
+
+# ---------------------------------------------------------------------------
+# Debug info in release binaries
+# ---------------------------------------------------------------------------
+
+# fake_release_env: a release row whose download is an x86_64 ELF; readelf
+# reports .debug_info when $SANDBOX/debug exists, and llvm-strip logs and
+# writes a smaller copy.
+fake_release_env() {
+    CACHE="$SANDBOX/cache"
+    REFRESH=""
+    APPS_FILE="$SANDBOX/apps.tsv"
+    {
+        echo '# name tier portable apt pacman dnf brew release file assets build'
+        echo 'rel extra zssh - - - - o/rel rel - -'
+    } >"$APPS_FILE"
+    fetch_release() { fake_elf "$6" 2 62; echo padding >>"$6"; }
+    readelf() { [[ -e $SANDBOX/debug ]] && echo '  [27] .debug_info PROGBITS'; return 0; }
+    mkdir -p "$SANDBOX/sbin"
+    {
+        echo '#!/usr/bin/env bash'
+        echo "echo \"llvm-strip \$*\" >>\"$STUB_LOG\""
+        declare -f fake_elf
+        echo 'fake_elf "$2" 2 62'
+    } >"$SANDBOX/sbin/llvm-strip"
+    chmod +x "$SANDBOX/sbin/llvm-strip"
+    PATH="$SANDBOX/sbin:$PATH"
+}
+
+# release_case [CODE]: in a subshell (the stubs are functions), set up
+# fake_release_env, run CODE, fetch the tools and set OUTPUT to
+# "ARCH PADDING-LINES MISSING".
+release_case() {
+    OUTPUT="$(
+        fake_release_env
+        eval "${1:-}"
+        fetch_tools x86_64 "$SANDBOX/bin" zssh >/dev/null 2>&1
+        echo "$(elf_arch "$SANDBOX/bin/rel") $(grep -c padding "$SANDBOX/bin/rel") ${MISSING_TOOLS:--}"
+    )"
+}
+
+test_release_with_debug_info_is_stripped() {
+    touch "$SANDBOX/debug"
+    release_case
+    assert_call_matches "^llvm-strip "
+    assert_eq "$OUTPUT" "x86_64 0 -"
+}
+
+test_release_without_debug_info_is_kept() {
+    release_case
+    refute_call_matches "strip"
+    assert_eq "$OUTPUT" "x86_64 1 -"
+}
+
+# An AppImage (bpftrace) carries its filesystem after the ELF; strip would
+# drop it.
+test_appimage_is_never_stripped() {
+    touch "$SANDBOX/debug"
+    release_case 'fetch_release() { fake_elf "$6" 2 62; printf "AI\x02" | dd of="$6" bs=1 seek=8 conv=notrunc 2>/dev/null; echo padding >>"$6"; }'
+    refute_call_matches "strip"
+    assert_eq "$OUTPUT" "x86_64 1 -"
+}
+
+test_failed_strip_keeps_download() {
+    touch "$SANDBOX/debug"
+    release_case 'printf "#!/bin/sh\nexit 1\n" >"$SANDBOX/sbin/llvm-strip"'
+    assert_eq "$OUTPUT" "x86_64 1 -"
+}
+
 # main with a fetch_tools that, like the real one, records a tool it couldn't get.
 run_main_missing_tool() {
     mkrepos

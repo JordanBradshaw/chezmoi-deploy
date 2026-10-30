@@ -250,17 +250,39 @@ fetch_zsh() {
 }
 
 # recipe_stamp KIND NAME: hash of the scripts that build NAME from source
-# (KIND/NAME.sh, the KIND helpers and KIND/patches/NAME/), so a changed
+# (KIND/NAME.sh, the KIND helpers and libraries, KIND/patches/NAME/), so a changed
 # recipe rebuilds the cached binary.
 recipe_stamp() {
     local kind=$1 name=$2 f
     for f in "$SCRIPT_DIR/$kind/$name.sh" "$SCRIPT_DIR/$kind/lib.sh" "$SCRIPT_DIR/$kind/sdk.sh" \
+        "$SCRIPT_DIR/$kind/deps.sh" \
         "$SCRIPT_DIR/$kind/patches/$name"/*; do
         if [[ -f $f ]]; then
             printf '%s\n' "${f#"$SCRIPT_DIR/"}"
             cat "$f"
         fi
     done | sha256sum | cut -c1-16
+}
+
+# strip_debug FILE: drop the debug info some releases ship (sysdig: 50 MB
+# of it) with llvm-strip, which handles every arch, else the host's strip.
+# AppImages (ELF magic followed by "AI") keep their payload after the ELF
+# and are left alone, as is FILE when no stripper copes.
+strip_debug() {
+    local file=$1 tool
+    [[ $(head -c 11 "$file" | tail -c 3 | od -An -tx1 | tr -d ' \n') == 414902 ]] && return 0
+    readelf -SW "$file" 2>/dev/null | grep -q '\.debug_info' || return 0
+    for tool in llvm-strip $(compgen -c llvm-strip- | sort -rV) strip; do
+        command -v "$tool" >/dev/null || continue
+        if "$tool" -o "$file.stripped" "$file" 2>/dev/null \
+            && [[ $(elf_arch "$file.stripped") == "$(elf_arch "$file")" ]]; then
+            log "stripped ${file##*/} with $tool"
+            mv -f "$file.stripped" "$file"
+            return 0
+        fi
+        rm -f "$file.stripped"
+    done
+    return 0
 }
 
 # fetch_tools ARCH DEST TARGET: put the TARGET bundle's tools for ARCH in
@@ -301,6 +323,7 @@ fetch_tools() {
                 fi
             elif [[ $release != - ]] \
                 && fetch_release "$name" "$release" "$(app "$name" file)" "$(app "$name" assets)" "$arch" "$dir/$name"; then
+                strip_debug "$dir/$name"
                 ok=1
             fi
             if [[ -z $ok ]]; then

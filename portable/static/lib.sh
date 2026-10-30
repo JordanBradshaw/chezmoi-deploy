@@ -13,6 +13,12 @@
 STATIC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATIC_SRC="${ZSH_PORTABLE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable}/static-src"
 
+# Libraries built by deps.sh.
+NCURSES_VERSION=6.5
+NCURSES_SHA256=136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
+LIBPCAP_VERSION=1.10.7
+LIBPCAP_SHA256=68fa62cffb974f4275641ce14c2e2d75739251f30e00e6a0900903b247d76a03
+
 # static_target ARCH: the zig target triple for a bundle arch.
 static_target() {
     case $1 in
@@ -39,10 +45,20 @@ static_fetch() {
     mv -f "$path.tmp" "$path"
 }
 
+static_fetch_ncurses() {
+    static_fetch "ncurses-$NCURSES_VERSION.tar.gz" \
+        "https://ftp.gnu.org/gnu/ncurses/ncurses-$NCURSES_VERSION.tar.gz" "$NCURSES_SHA256"
+}
+
+static_fetch_libpcap() {
+    static_fetch "libpcap-$LIBPCAP_VERSION.tar.xz" \
+        "https://www.tcpdump.org/release/libpcap-$LIBPCAP_VERSION.tar.xz" "$LIBPCAP_SHA256"
+}
+
 # The bash that runs a recipe (on stdin) in a temp dir, then checks that it
-# left a static binary at OUT_FILE. Recipes get TARGET, CC, AR, RANLIB, SRC
-# (the sources), PATCHES (static/patches), JOBS, OUT_FILE and their own
-# variables, and `quiet CMD...`, which shows CMD's output only if it fails.
+# left a static binary at OUT_FILE. Recipes get TARGET, CC, CXX, AR, RANLIB,
+# SRC (the sources), PATCHES (static/patches), DEPS (deps.sh, to source),
+# NCURSES_VERSION, LIBPCAP_VERSION, JOBS, OUT_FILE and their own variables, and `quiet CMD...`, which shows CMD's output only if it fails.
 # shellcheck disable=SC2016 # expanded by the inner bash
 STATIC_RUNNER='
 set -euo pipefail
@@ -105,19 +121,21 @@ static_run() {
     mkdir -p "$(dirname "$out")" "$STATIC_SRC"
     outdir="$(cd "$(dirname "$out")" && pwd)"
     local -a env=(
-        "TARGET=$target" "CC=zig cc -target $target" "AR=zig ar" "RANLIB=zig ranlib"
+        "TARGET=$target" "CC=zig cc -target $target" "CXX=zig c++ -target $target"
+        "AR=zig ar" "RANLIB=zig ranlib"
+        "NCURSES_VERSION=$NCURSES_VERSION" "LIBPCAP_VERSION=$LIBPCAP_VERSION"
         "JOBS=$(nproc 2>/dev/null || echo 4)" "STATIC_TOOLS=${STATIC_TOOLS:-}" "$@"
     )
     if static_native; then
         (
-            for var in "${env[@]}" "SRC=$STATIC_SRC" "PATCHES=$STATIC_DIR/patches" "OUT_FILE=$outdir/${out##*/}"; do
+            for var in "${env[@]}" "SRC=$STATIC_SRC" "PATCHES=$STATIC_DIR/patches" "DEPS=$STATIC_DIR/deps.sh" "OUT_FILE=$outdir/${out##*/}"; do
                 export "${var?}"
             done
             "$BASH" -c "$STATIC_RUNNER"
         )
     else
         local -a args=()
-        for var in "${env[@]}" "SRC=/src" "PATCHES=/static/patches" "OUT_FILE=/out/${out##*/}" \
+        for var in "${env[@]}" "SRC=/src" "PATCHES=/static/patches" "DEPS=/static/deps.sh" "OUT_FILE=/out/${out##*/}" \
             "STATIC_APT=1" "OWNER=$(id -u):$(id -g)"; do
             args+=(-e "$var")
         done

@@ -241,14 +241,16 @@ test_auto_mode_uses_docker_without_tools() {
 test_recipes_pin_sources() {
     local r
     for r in "$REPO_DIR"/portable/static/*.sh; do
-        [[ ${r##*/} == lib.sh ]] && continue
+        [[ ${r##*/} == lib.sh || ${r##*/} == deps.sh ]] && continue
         grep -Eq '^[A-Z0-9_]+_VERSION=[0-9]' "$r" || fail "${r##*/}: no pinned version"
         grep -Eq '^[A-Z0-9_]+_SHA256=[0-9a-f]{64}$' "$r" || fail "${r##*/}: no sha256"
         grep -q 'static_fetch ' "$r" || fail "${r##*/}: no static_fetch"
         grep -q 'static_run ' "$r" || fail "${r##*/}: no static_run"
         [[ -x $r ]] || fail "${r##*/}: not executable"
     done
-    [[ -f $REPO_DIR/portable/static/ss.sh && -f $REPO_DIR/portable/static/lsof.sh ]] || fail "missing recipes"
+    for r in ss lsof nethogs iftop; do
+        [[ -f $REPO_DIR/portable/static/$r.sh ]] || fail "missing recipe $r"
+    done
 }
 
 test_recipe_rejects_unknown_arch() {
@@ -272,7 +274,8 @@ e2e_check() {
         "$REPO_DIR/portable/static/$name.sh" "$arch" "$out" || { fail "$name $arch: build failed"; return; }
     fi
     readelf -lW "$out" | grep -q INTERP && fail "$name $arch: not static"
-    docker run --rm --platform "$platform" -v "$E2E_OUT/$arch:/t:ro" debian:12 "/t/$name" "$@" >"$SANDBOX/run.out" 2>&1 \
+    # shellcheck disable=SC2086 # extra docker options
+    docker run --rm ${E2E_DOCKER_ARGS:-} --platform "$platform" -v "$E2E_OUT/$arch:/t:ro" debian:12 "/t/$name" "$@" >"$SANDBOX/run.out" 2>&1 \
         || fail "$name $arch: '$name $*' failed: $(cat "$SANDBOX/run.out")"
     return 0
 }
@@ -281,6 +284,9 @@ test_e2e_x86_64() {
     e2e_check x86_64 linux/amd64 ss -tln
     e2e_check x86_64 linux/amd64 lsof -v
     e2e_check x86_64 linux/amd64 lsof -p 1
+    e2e_check x86_64 linux/amd64 nethogs -V
+    e2e_check x86_64 linux/amd64 iftop -h
+    E2E_DOCKER_ARGS="--cap-add NET_ADMIN --cap-add NET_RAW" e2e_check x86_64 linux/amd64 iftop -t -s 1 -n
 }
 
 test_e2e_aarch64() {
@@ -291,6 +297,8 @@ test_e2e_aarch64() {
     # qemu-user has no netlink, so ss can only print its version.
     e2e_check aarch64 linux/arm64 ss -V
     e2e_check aarch64 linux/arm64 lsof -v
+    e2e_check aarch64 linux/arm64 nethogs -V
+    e2e_check aarch64 linux/arm64 iftop -h
 }
 
 test_e2e_armv7l() {
@@ -300,6 +308,8 @@ test_e2e_armv7l() {
     fi
     e2e_check armv7l linux/arm/v7 ss -V
     e2e_check armv7l linux/arm/v7 lsof -v
+    e2e_check armv7l linux/arm/v7 nethogs -V
+    e2e_check armv7l linux/arm/v7 iftop -h
 }
 
 # ---------------------------------------------------------------------------

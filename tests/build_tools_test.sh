@@ -836,7 +836,7 @@ f = json.load(open(sys.argv[1]))
 print(f["id"], f["version"], f["options"]["rustTargets"]["default"], f["options"]["goVersion"]["default"])
 EOF
 )"
-    assert_eq "$OUTPUT" "zsh-builder 0.2.0 x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu latest"
+    assert_eq "$OUTPUT" "zsh-builder 0.3.0 x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu latest"
 }
 
 # The Dockerfile route doesn't apply containerEnv, so it sets the same ENV.
@@ -1013,7 +1013,10 @@ test_static_scripts_in_recipe_hash() {
     local b=$OUTPUT
     printf '# helpers 2\n' >"$STATIC_DIR/lib.sh"
     btp 'load_profile x86_64-v3; load_tools; recipe_hash ss'
-    [[ -n $a && $a != "$b" && $b != "$OUTPUT" ]] || fail "hash unchanged: $a $b $OUTPUT"
+    local c=$OUTPUT
+    printf '# ncurses 7\n' >"$STATIC_DIR/deps.sh"
+    btp 'load_profile x86_64-v3; load_tools; recipe_hash ss'
+    [[ -n $a && $a != "$b" && $b != "$c" && $c != "$OUTPUT" ]] || fail "hash unchanged: $a $b $c $OUTPUT"
     return 0
 }
 
