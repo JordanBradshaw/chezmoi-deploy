@@ -273,18 +273,20 @@ test_recipes_pin_sources() {
         grep -q 'static_run ' "$r" || fail "${r##*/}: no static_run"
         [[ -x $r ]] || fail "${r##*/}: not executable"
     done
-    for r in ss nstat lsof nethogs iftop below; do
+    for r in ss nstat ip tc lsof nethogs iftop below tcpdump ethtool strace iperf3 socat; do
         [[ -f $REPO_DIR/portable/static/$r.sh ]] || fail "missing recipe $r"
     done
 }
 
-# ss and nstat both come from iproute2: same pinned tarball.
+# ss, nstat, ip and tc all come from iproute2: same pinned tarball.
 test_iproute2_recipes_agree() {
-    local a b
+    local a b r
     a="$(grep -E '^IPROUTE2_(VERSION|SHA256)=' "$REPO_DIR/portable/static/ss.sh")"
-    b="$(grep -E '^IPROUTE2_(VERSION|SHA256)=' "$REPO_DIR/portable/static/nstat.sh" 2>/dev/null)"
     [[ -n $a ]] || fail "ss.sh pins nothing"
-    assert_eq "$b" "$a"
+    for r in nstat ip tc; do
+        b="$(grep -E '^IPROUTE2_(VERSION|SHA256)=' "$REPO_DIR/portable/static/$r.sh" 2>/dev/null)"
+        [[ $b == "$a" ]] || fail "$r.sh pins differ from ss.sh"
+    done
 }
 
 test_below_has_no_armv7l() {
@@ -315,6 +317,8 @@ e2e_check() {
         "$REPO_DIR/portable/static/$name.sh" "$arch" "$out" || { fail "$name $arch: build failed"; return; }
     fi
     readelf -lW "$out" | grep -q INTERP && fail "$name $arch: not static"
+    # zig cc's default UBSan runtime aborts the tool on harmless overflows.
+    grep -qa 'cannot be represented in type' "$out" && fail "$name $arch: built with UBSan"
     # shellcheck disable=SC2086 # extra docker options
     docker run --rm ${E2E_DOCKER_ARGS:-} --platform "$platform" -v "$E2E_OUT/$arch:/t:ro" debian:12 "/t/$name" "$@" >"$SANDBOX/run.out" 2>&1 \
         || fail "$name $arch: '$name $*' failed: $(cat "$SANDBOX/run.out")"
@@ -331,6 +335,17 @@ test_e2e_x86_64() {
     e2e_check x86_64 linux/amd64 iftop -h
     E2E_DOCKER_ARGS="--cap-add NET_ADMIN --cap-add NET_RAW" e2e_check x86_64 linux/amd64 iftop -t -s 1 -n
     e2e_check x86_64 linux/amd64 below --help
+    e2e_check x86_64 linux/amd64 ip -s link
+    e2e_check x86_64 linux/amd64 ip route
+    e2e_check x86_64 linux/amd64 tc -s qdisc
+    E2E_DOCKER_ARGS="--cap-add NET_ADMIN --cap-add NET_RAW" e2e_check x86_64 linux/amd64 tcpdump -D
+    e2e_check x86_64 linux/amd64 tcpdump -d "udp port 53 or icmp"
+    e2e_check x86_64 linux/amd64 ethtool --version
+    e2e_check x86_64 linux/amd64 ethtool lo
+    E2E_DOCKER_ARGS="--cap-add SYS_PTRACE" e2e_check x86_64 linux/amd64 strace -f -e trace=network -o /dev/null /t/ss -tln
+    e2e_check x86_64 linux/amd64 iperf3 --version
+    e2e_check x86_64 linux/amd64 socat -V
+    e2e_check x86_64 linux/amd64 socat -u SYSTEM:"echo hi" STDOUT
 }
 
 test_e2e_aarch64() {
@@ -344,6 +359,13 @@ test_e2e_aarch64() {
     e2e_check aarch64 linux/arm64 nstat -V
     e2e_check aarch64 linux/arm64 nethogs -V
     e2e_check aarch64 linux/arm64 iftop -h
+    e2e_check aarch64 linux/arm64 ip -V
+    e2e_check aarch64 linux/arm64 tc -V
+    e2e_check aarch64 linux/arm64 tcpdump --version
+    e2e_check aarch64 linux/arm64 ethtool --version
+    e2e_check aarch64 linux/arm64 strace -V
+    e2e_check aarch64 linux/arm64 iperf3 --version
+    e2e_check aarch64 linux/arm64 socat -V
     e2e_check aarch64 linux/arm64 below --help
 }
 
@@ -357,6 +379,13 @@ test_e2e_armv7l() {
     e2e_check armv7l linux/arm/v7 nstat -V
     e2e_check armv7l linux/arm/v7 nethogs -V
     e2e_check armv7l linux/arm/v7 iftop -h
+    e2e_check armv7l linux/arm/v7 ip -V
+    e2e_check armv7l linux/arm/v7 tc -V
+    e2e_check armv7l linux/arm/v7 tcpdump --version
+    e2e_check armv7l linux/arm/v7 ethtool --version
+    e2e_check armv7l linux/arm/v7 strace -V
+    e2e_check armv7l linux/arm/v7 iperf3 --version
+    e2e_check armv7l linux/arm/v7 socat -V
 }
 
 # ---------------------------------------------------------------------------
