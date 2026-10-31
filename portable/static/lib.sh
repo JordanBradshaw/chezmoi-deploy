@@ -162,8 +162,18 @@ static_run() {
         done
         args+=(-v "$STATIC_SRC:/src:ro" -v "$STATIC_DIR:/static:ro" -v "$outdir:/out")
         if [[ -n ${STATIC_ALPINE:-} ]]; then
-            local platform
+            local platform got
             platform="$(static_platform "$arch")" || return 1
+            # The classic image store keeps one platform per tag, and run
+            # --platform then uses whatever the tag holds: pull for this
+            # platform, and refuse a tag still holding another (offline).
+            docker pull -q --platform "$platform" "$STATIC_ALPINE_IMAGE" >/dev/null 2>&1 || true
+            got="$(docker image inspect -f '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' \
+                "$STATIC_ALPINE_IMAGE" 2>/dev/null)"
+            if [[ ${got%/v8} != "$platform" ]]; then
+                echo "static: $STATIC_ALPINE_IMAGE is ${got:-missing}, not $platform" >&2
+                return 1
+            fi
             # shellcheck disable=SC2016 # expanded in the container
             docker run --rm -i --platform "$platform" "${args[@]}" -e STATIC_RUNNER="$STATIC_RUNNER" \
                 "$STATIC_ALPINE_IMAGE" sh -c "apk add -q bash binutils ${STATIC_APK:-} >/dev/null && exec bash -c \"\$STATIC_RUNNER\""
