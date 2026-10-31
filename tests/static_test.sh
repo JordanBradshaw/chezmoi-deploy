@@ -183,8 +183,15 @@ test_native_needs_static_tools() {
     assert_output_matches "needs bison"
 }
 
+# stub_docker: logs every call; `image inspect` reports $STUB_IMAGE_PLATFORM
+# (default: the platform last pulled), `run` saves its stdin.
 stub_docker() {
-    stub docker 'echo "docker $*" >>"$STUB_LOG"; cat >"$SANDBOX/docker-stdin"'
+    stub docker 'echo "docker $*" >>"$STUB_LOG"
+case $1 in
+    pull) while (( $# )); do [[ $1 == --platform ]] && echo "$2" >"$SANDBOX/pulled"; shift; done ;;
+    image) echo "${STUB_IMAGE_PLATFORM:-$(cat "$SANDBOX/pulled" 2>/dev/null)}" ;;
+    run) cat >"$SANDBOX/docker-stdin" ;;
+esac'
 }
 
 test_docker_run_mounts_and_env() {
@@ -249,6 +256,34 @@ EOF"
     [[ $call == *"-e FOO=bar"* && $call == *"-e OUT_FILE=/out/tool"* ]] || fail "env: $call"
     [[ $call != *"-e CC="* ]] || fail "zig CC passed to Alpine: $call"
     grep -q '^echo the-recipe$' "$SANDBOX/docker-stdin" || fail "recipe not on stdin"
+}
+
+# The classic docker image store keeps one platform per tag: the image must
+# be pulled for the target platform before every run, and the run refused if
+# the tag still points at another one (offline, say).
+test_alpine_pulls_target_platform_first() {
+    stub_docker
+    sl "STATIC_ALPINE=1 static_run aarch64 '$SANDBOX/out/tool' </dev/null"
+    assert_eq "$STATUS" 0
+    local calls
+    calls="$(cut -d' ' -f1-4 "$STUB_LOG")"
+    [[ $calls == "docker pull -q --platform"*"docker image inspect"*"docker run --rm -i"* ]] || fail "order: $calls"
+    grep -q '^docker pull -q --platform linux/arm64 rust:' "$STUB_LOG" || fail "pull: $(cat "$STUB_LOG")"
+}
+
+test_alpine_refuses_image_for_other_platform() {
+    stub_docker
+    STUB_IMAGE_PLATFORM=linux/arm/v7 sl "STATIC_ALPINE=1 static_run aarch64 '$SANDBOX/out/tool' </dev/null"
+    [[ $STATUS -ne 0 ]] || fail "ran an arm/v7 image for aarch64"
+    assert_output_matches "is linux/arm/v7, not linux/arm64"
+    grep -q '^docker run' "$STUB_LOG" && fail "docker run happened"
+    return 0
+}
+
+test_alpine_accepts_arm64_v8() {
+    stub_docker
+    STUB_IMAGE_PLATFORM=linux/arm64/v8 sl "STATIC_ALPINE=1 static_run aarch64 '$SANDBOX/out/tool' </dev/null"
+    assert_eq "$STATUS" 0
 }
 
 test_alpine_platforms() {
