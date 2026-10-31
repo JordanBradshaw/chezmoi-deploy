@@ -5,7 +5,8 @@
 # Usage: nethogs.sh ARCH OUT
 #
 #   Linked with static ncurses and libpcap (deps.sh); libpcap's grammar
-#   needs flex and bison. See lib.sh.
+#   needs flex and bison. Without zig cc's default UBSan, which aborts on
+#   harmless overflows. See lib.sh.
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -30,6 +31,8 @@ build_libpcap
 tar -xzf "$SRC/nethogs-$NETHOGS_VERSION.tar.gz"
 cd "nethogs-$NETHOGS_VERSION/src"
 quiet make -f MakeApp.mk -j"$JOBS" nethogs CC="$CC" CXX="$CXX" VERSION="$NETHOGS_VERSION" \
+    CFLAGS="-O2 -fno-sanitize=undefined" \
+    CXXFLAGS="-O2 -std=c++14 -Wno-missing-field-initializers -fno-sanitize=undefined" \
     CPPFLAGS="$CPPFLAGS" LDFLAGS="$LDFLAGS -static -s"
 cp nethogs "$OUT_FILE"
 EOF

@@ -11,7 +11,8 @@
 # one or the other.
 #
 # A recipe that sets STATIC_ALPINE=1 (Rust with C libraries only Alpine
-# ships static, like below's libelf) always runs in STATIC_ALPINE_IMAGE for
+# ships static, like below's libelf; or code zig's headers break, like
+# strace) always runs in STATIC_ALPINE_IMAGE (the recipe may set it) for
 # the target's platform, emulated with qemu binfmt for other arches; it
 # apk-installs bash, binutils and STATIC_APK first.
 
