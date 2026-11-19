@@ -21,7 +21,7 @@ setup() {
     SANDBOX="$(mktemp -d)"
     export SANDBOX
     unset APPS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR STATIC_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
-        STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF ANDROID_NDK_HOME
+        STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF ANDROID_NDK_HOME QOS_IMAGE
     OUTPUT=""
     STATUS=0
 }
@@ -1018,7 +1018,7 @@ builder_build() {
     docker_stub
     mkdir -p "$SANDBOX/cz/apps"
     cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
-    OUTPUT="$(CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" BUILDER_ENV_FILE="$SANDBOX/.env" \
+    OUTPUT="$(CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" XDG_CONFIG_HOME="$SANDBOX/cfg" BUILDER_ENV_FILE="$SANDBOX/.env" \
         DOCKER_SOCKET="$SANDBOX/docker.sock" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" build "$@" 2>&1)"
     STATUS=$?
 }
@@ -1066,6 +1066,45 @@ test_builder_build_pulls_sdk_image_for_qos() {
     QOS_IMAGE=registry.example/yocto:1 builder_build qos-orin
     grep -qx "pull" "$STUB_LOG" && grep -qx "registry.example/yocto:1" "$STUB_LOG" || fail "no pull: $(tr '\n' ' ' <"$STUB_LOG")"
     grep -qxF "QOS_IMAGE=registry.example/yocto:1" "$SANDBOX/.env" || fail "QOS_IMAGE not in .env"
+    return 0
+}
+
+# No default SDK image: it comes from the env or the secrets file.
+test_builder_build_reads_qos_image_from_secrets() {
+    : >"$SANDBOX/docker.sock"
+    mkdir -p "$SANDBOX/cfg/secrets"
+    printf 'EGET_GITHUB_TOKEN=t\nQOS_IMAGE=registry.example/sdk:2\n' >"$SANDBOX/cfg/secrets/env"
+    builder_build qos-orin
+    grep -qx "registry.example/sdk:2" "$STUB_LOG" || fail "no pull: $(tr '\n' ' ' <"$STUB_LOG")"
+    grep -qxF "QOS_IMAGE=registry.example/sdk:2" "$SANDBOX/.env" || fail "QOS_IMAGE not in .env"
+    return 0
+}
+
+test_builder_build_without_qos_image_skips_pull() {
+    : >"$SANDBOX/docker.sock"
+    builder_build qos-orin
+    assert_eq "$STATUS" 0
+    local log
+    log="$(tr '\n' ' ' <"$STUB_LOG")"
+    [[ $log == *" pull "* ]] && fail "pulled without QOS_IMAGE: $log"
+    [[ $log == *"run --rm qos-orin"* ]] || fail "qos-orin not run: $log"
+    [[ $OUTPUT == *"QOS_IMAGE"* ]] || fail "no warning: $OUTPUT"
+    grep -q '^QOS_IMAGE=.' "$SANDBOX/.env" && fail "QOS_IMAGE in .env: $(cat "$SANDBOX/.env")"
+    return 0
+}
+
+test_cross_run_needs_qos_image() {
+    OUTPUT="$(env -u QOS_IMAGE "$BASH_BIN" -c "source '$REPO_DIR/portable/cross/lib.sh'; cross_run '$SANDBOX/out/x' </dev/null" 2>&1)"
+    STATUS=$?
+    [[ $STATUS -ne 0 ]] || fail "cross_run ran without QOS_IMAGE"
+    [[ $OUTPUT == *QOS_IMAGE* ]] || fail "no hint: $OUTPUT"
+    return 0
+}
+
+test_repo_has_no_default_sdk_image() {
+    local hits
+    hits="$(grep -rnE -e '[$][{]QOS_IMAGE:-[^}]' "$REPO_DIR/portable" "$REPO_DIR/compose.yaml" "$REPO_DIR/tests/portable_test.sh")"
+    [[ -z $hits ]] || fail "default image: $hits"
     return 0
 }
 

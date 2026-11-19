@@ -1037,7 +1037,6 @@ done
 # Oldest likely OS per target: JetPack 4 is Ubuntu 18.04, Raspberry Pi OS is
 # Debian. arm64/arm/qos need qemu binfmt (tonistiigi/binfmt --install
 # arm64,arm).
-QOS_IMAGE=${QOS_IMAGE:-registry.example/sdk:latest}
 if [[ -n ${PORTABLE_E2E:-} ]]; then
     for arch in ${PORTABLE_E2E_ARCHES:-x86_64}; do
         case $arch in
@@ -1048,7 +1047,8 @@ if [[ -n ${PORTABLE_E2E:-} ]]; then
             armv7l) E2E_DISABLED="" e2e armv7l linux/arm/v7 debian:bookworm-slim ;;
             # The Jetsons' Yocto OS: x86_64 SDK container whose aarch64
             # sysroot holds the target's libraries, used through qemu.
-            qos) E2E_DISABLED="" e2e aarch64 linux/amd64 "$QOS_IMAGE" \
+            qos) [[ -n ${QOS_IMAGE:-} ]] || { echo "  FAIL e2e qos: QOS_IMAGE not set"; FAIL=$((FAIL + 1)); continue; }
+                E2E_DISABLED="" e2e aarch64 linux/amd64 "$QOS_IMAGE" \
                 -e QEMU_LD_PREFIX=/opt/nos/sysroots/armv8a-oe4t-linux ;;
         esac
     done

@@ -25,8 +25,9 @@
 #   image.
 #
 #   build writes the repo's .env for compose.yaml (ids, paths, images; no
-#   secrets) and, for qos-orin, pulls the Yocto SDK image ($QOS_IMAGE) here
-#   with this host's registry login. The services also get the Docker
+#   secrets) and, for qos-orin, pulls the SDK image here with this host's
+#   registry login. The image has no default: QOS_IMAGE in the env or in
+#   ~/.config/secrets/env; without it qos-orin's cross: recipes fail. The services also get the Docker
 #   socket ($DOCKER_SOCKET, else the one of $DOCKER_HOST or the active
 #   docker context), which is root on this host. Under rootless Docker the
 #   containers run as root, which is the invoking user on the host. A
@@ -53,6 +54,18 @@ setup_run() {
     resolve_chezmoi_src || exit 1
     load_github_token
     mkdir -p "$CACHE/home" "$CACHE/xdg-cache"
+}
+
+# qos_image: the SDK image for cross: recipes, from $QOS_IMAGE or the
+# secrets file; empty if neither has it. There is no default.
+qos_image() {
+    local secrets="${XDG_CONFIG_HOME:-$HOME/.config}/secrets/env" line image=${QOS_IMAGE:-}
+    if [[ -z $image && -r $secrets ]]; then
+        while IFS= read -r line; do
+            [[ $line == QOS_IMAGE=* ]] && image="${line#QOS_IMAGE=}"
+        done <"$secrets"
+    fi
+    echo "$image"
 }
 
 # docker_socket: $DOCKER_SOCKET, else the unix socket of $DOCKER_HOST or the
@@ -101,7 +114,8 @@ build() {
     docker_gid="$(stat -c %g "$sock")"
     [[ $user == 0:0 ]] && docker_gid=0
     local env_file=${BUILDER_ENV_FILE:-$REPO/.env}
-    local qos_image=${QOS_IMAGE:-registry.example/sdk:latest}
+    local qos_image
+    qos_image="$(qos_image)"
     {
         echo "# Written by portable/builder.sh build; no secrets."
         echo "BUILDER_UID=${user%:*}"
@@ -113,10 +127,14 @@ build() {
         echo "ZSH_PORTABLE_CACHE=$CACHE"
         echo "BUILDER_IMAGE=$IMAGE"
         echo "ANDROID_BUILDER_IMAGE=$ANDROID_IMAGE"
-        echo "QOS_IMAGE=$qos_image"
+        [[ -n $qos_image ]] && echo "QOS_IMAGE=$qos_image"
     } >"$env_file"
     if [[ " ${profiles[*]} " == *" qos-orin "* ]]; then
-        docker pull "$qos_image" >&2 || echo "builder: could not pull $qos_image; using the local copy" >&2
+        if [[ -z $qos_image ]]; then
+            echo "builder: QOS_IMAGE not set (env or secrets file); qos-orin's cross: recipes will fail" >&2
+        else
+            docker pull "$qos_image" >&2 || echo "builder: could not pull $qos_image; using the local copy" >&2
+        fi
     fi
     for p in "${profiles[@]}"; do
         echo "builder: building $p" >&2

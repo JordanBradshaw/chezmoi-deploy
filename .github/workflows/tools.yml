@@ -6,8 +6,8 @@ name: tools
 # changed. Each job uploads tools-<profile> (bin/ and tools.lock); the
 # bundle jobs upload zsh-portable-<profile> (the zssh bundle).
 #
-# Not here: cross: recipes (qos-orin's tmux, nvtop) need the Yocto SDK image
-# from the private registry; those tools fall back as they do offline.
+# Not here: cross: recipes (qos-orin's tmux, nvtop) need a private SDK image
+# ($QOS_IMAGE); those tools fall back as they do offline.
 #
 # Into the local cache:
 #   gh run download RUN -n tools-pi4 -D ~/.cache/zsh-portable/tools-out/pi4

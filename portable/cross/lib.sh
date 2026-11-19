@@ -1,12 +1,12 @@
 # Shared by cross/*.sh: run a build inside the Jetson Yocto SDK container.
 #
 # Sourced on the host. Sources are cached in
-# ${XDG_CACHE_HOME:-~/.cache}/zsh-portable/cross-src; QOS_IMAGE overrides the
-# SDK image. Inside the container, /cross/sdk.sh provides the SDK environment
+# ${XDG_CACHE_HOME:-~/.cache}/zsh-portable/cross-src; QOS_IMAGE names the SDK
+# image (no default; builder.sh reads it from the env or secrets file). Inside the container, /cross/sdk.sh provides the SDK environment
 # and helpers for static libraries.
 
 CROSS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CROSS_IMAGE=${QOS_IMAGE:-registry.example/sdk:latest}
+CROSS_IMAGE=${QOS_IMAGE:-}
 CROSS_SRC="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable/cross-src"
 
 NCURSES_VERSION=6.5
@@ -41,6 +41,7 @@ cross_fetch_libevent() {
 cross_run() {
     local out=$1
     shift
+    [[ -n $CROSS_IMAGE ]] || { echo "${0##*/}: QOS_IMAGE not set (the SDK image)" >&2; return 1; }
     local outdir env=() var
     mkdir -p "$(dirname "$out")"
     outdir="$(cd "$(dirname "$out")" && pwd)"

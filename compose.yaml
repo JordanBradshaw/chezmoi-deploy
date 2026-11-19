@@ -3,8 +3,8 @@
 # goes to <cache>/tools-out/NAME/ (bin/ and tools.lock).
 #
 # portable/builder.sh build [PROFILE...] [-- ARGS] is the entry point: it
-# builds the images if needed, writes .env (ids, paths) and pulls the Yocto
-# SDK image on the host. After that, `docker compose run --rm pi4 --resolve`
+# builds the images if needed, writes .env (ids, paths) and pulls the SDK
+# image ($QOS_IMAGE, no default) on the host. After that, `docker compose run --rm pi4 --resolve`
 # and `docker compose up` work too.
 #
 # The services get the host's Docker socket: cross: and STATIC_ALPINE
@@ -31,7 +31,7 @@ x-builder: &builder
     HOME: ${ZSH_PORTABLE_CACHE}/home
     CARGO_HOME: ${ZSH_PORTABLE_CACHE}/cargo-home
     ZIG_GLOBAL_CACHE_DIR: ${ZSH_PORTABLE_CACHE}/zig
-    QOS_IMAGE: ${QOS_IMAGE:-registry.example/sdk:latest}
+    QOS_IMAGE: ${QOS_IMAGE:-}
     # Passed by name from the caller's environment; never in .env.
     EGET_GITHUB_TOKEN:
 
