@@ -996,6 +996,10 @@ docker_stub() {
     cat >"$STUBS/docker" <<'EOF'
 #!/usr/bin/env bash
 printf "%s\n" docker "$@" >>"$STUB_LOG"
+case "$1 ${2:-}" in
+    "info "*) [[ -n ${STUB_DOCKER_ROOTLESS:-} ]] && echo "[name=seccomp,profile=builtin name=rootless]"; exit 0 ;;
+    "context inspect") echo "${STUB_DOCKER_HOST:-unix:///var/run/docker.sock}"; exit 0 ;;
+esac
 for bad in ${STUB_DOCKER_FAIL:-}; do [[ " $* " == *" $bad "* ]] && exit 1; done
 exit 0
 EOF
@@ -1080,6 +1084,45 @@ test_builder_build_rejects_unknown_profile() {
     [[ $STATUS -ne 0 ]] || fail "accepted pdp11"
     [[ $OUTPUT == *"unknown profile pdp11"* ]] || fail "no message: $OUTPUT"
     grep -q compose "$STUB_LOG" && fail "compose ran"
+    return 0
+}
+
+# Rootless Docker maps container root to the invoking user; any other
+# container uid is a subuid that can't write the cache.
+test_builder_build_rootless_runs_as_container_root() {
+    : >"$SANDBOX/docker.sock"
+    STUB_DOCKER_ROOTLESS=1 builder_build pi4
+    assert_eq "$STATUS" 0
+    grep -qxF "BUILDER_UID=0" "$SANDBOX/.env" || fail "uid: $(cat "$SANDBOX/.env")"
+    grep -qxF "BUILDER_GID=0" "$SANDBOX/.env" || fail "gid"
+    grep -qxF "DOCKER_GID=0" "$SANDBOX/.env" || fail "docker gid"
+    return 0
+}
+
+# Without DOCKER_SOCKET, the socket of the active context (or DOCKER_HOST).
+test_builder_build_socket_from_docker_context() {
+    : >"$SANDBOX/ctx.sock"
+    docker_stub
+    mkdir -p "$SANDBOX/cz/apps"
+    cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
+    OUTPUT="$(env -u DOCKER_SOCKET -u DOCKER_HOST STUB_DOCKER_HOST="unix://$SANDBOX/ctx.sock" CHEZMOI_SRC="$SANDBOX/cz" \
+        XDG_CACHE_HOME="$SANDBOX/xdg" BUILDER_ENV_FILE="$SANDBOX/.env" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" build pi4 2>&1)"
+    STATUS=$?
+    assert_eq "$STATUS" 0
+    grep -qxF "DOCKER_SOCKET=$SANDBOX/ctx.sock" "$SANDBOX/.env" || fail "socket: $(cat "$SANDBOX/.env") $OUTPUT"
+    OUTPUT="$(env -u DOCKER_SOCKET DOCKER_HOST="unix://$SANDBOX/ctx.sock" CHEZMOI_SRC="$SANDBOX/cz" \
+        XDG_CACHE_HOME="$SANDBOX/xdg" BUILDER_ENV_FILE="$SANDBOX/.env" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" build pi4 2>&1)"
+    grep -qxF "DOCKER_SOCKET=$SANDBOX/ctx.sock" "$SANDBOX/.env" || fail "DOCKER_HOST socket: $(cat "$SANDBOX/.env")"
+    return 0
+}
+
+test_builder_run_rootless_runs_as_container_root() {
+    docker_stub
+    mkdir -p "$SANDBOX/cz/apps"
+    cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
+    STUB_DOCKER_ROOTLESS=1 CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" PATH="$STUBS:$PATH" \
+        "$BASH_BIN" "$BUILDER" run echo hi >/dev/null 2>&1
+    [[ $(tr '\n' ' ' <"$STUB_LOG") == *"--user 0:0 "* ]] || fail "user: $(tr '\n' ' ' <"$STUB_LOG")"
     return 0
 }
 

@@ -27,8 +27,10 @@
 #   build writes the repo's .env for compose.yaml (ids, paths, images; no
 #   secrets) and, for qos-orin, pulls the Yocto SDK image ($QOS_IMAGE) here
 #   with this host's registry login. The services also get the Docker
-#   socket ($DOCKER_SOCKET, default /var/run/docker.sock), which is root on
-#   this host. A failed profile is reported at the end; the others still run.
+#   socket ($DOCKER_SOCKET, else the one of $DOCKER_HOST or the active
+#   docker context), which is root on this host. Under rootless Docker the
+#   containers run as root, which is the invoking user on the host. A
+#   failed profile is reported at the end; the others still run.
 
 set -euo pipefail
 
@@ -53,6 +55,26 @@ setup_run() {
     mkdir -p "$CACHE/home" "$CACHE/xdg-cache"
 }
 
+# docker_socket: $DOCKER_SOCKET, else the unix socket of $DOCKER_HOST or the
+# active docker context, else /var/run/docker.sock.
+docker_socket() {
+    local host=${DOCKER_HOST:-}
+    if [[ -n ${DOCKER_SOCKET:-} ]]; then echo "$DOCKER_SOCKET"; return; fi
+    [[ -n $host ]] || host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+    if [[ $host == unix://* ]]; then echo "${host#unix://}"; else echo /var/run/docker.sock; fi
+}
+
+# container_user: uid:gid for the containers. Rootless Docker maps
+# container root to the invoking user (other uids are subuids that can't
+# write the cache), so there it is 0:0.
+container_user() {
+    if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+        echo 0:0
+    else
+        echo "$(id -u):$(id -g)"
+    fi
+}
+
 # build PROFILE... [-- ARG...]: compose run per profile.
 build() {
     local -a profiles=() args=() failed=()
@@ -71,16 +93,20 @@ build() {
             exit 2
         fi
     done
-    local sock=${DOCKER_SOCKET:-/var/run/docker.sock}
+    local sock user docker_gid
+    sock="$(docker_socket)"
     [[ -e $sock ]] || { echo "builder: no Docker socket at $sock (set DOCKER_SOCKET)" >&2; exit 1; }
     setup_run
+    user="$(container_user)"
+    docker_gid="$(stat -c %g "$sock")"
+    [[ $user == 0:0 ]] && docker_gid=0
     local env_file=${BUILDER_ENV_FILE:-$REPO/.env}
     local qos_image=${QOS_IMAGE:-registry.example/sdk:latest}
     {
         echo "# Written by portable/builder.sh build; no secrets."
-        echo "BUILDER_UID=$(id -u)"
-        echo "BUILDER_GID=$(id -g)"
-        echo "DOCKER_GID=$(stat -c %g "$sock")"
+        echo "BUILDER_UID=${user%:*}"
+        echo "BUILDER_GID=${user#*:}"
+        echo "DOCKER_GID=$docker_gid"
         echo "DOCKER_SOCKET=$sock"
         echo "REPO_DIR=$REPO"
         echo "CHEZMOI_SRC=$CHEZMOI_SRC"
@@ -115,7 +141,7 @@ case ${1:-} in
         tty=()
         [[ -t 0 && -t 1 ]] && tty=(-it)
         docker run --rm "${tty[@]}" \
-            --user "$(id -u):$(id -g)" \
+            --user "$(container_user)" \
             -v "$REPO:/src" -w /src \
             -v "$CHEZMOI_SRC:/chezmoi" -e CHEZMOI_SRC=/chezmoi \
             -v "$CACHE:$CACHE" \
