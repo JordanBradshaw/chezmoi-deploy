@@ -1,0 +1,51 @@
+# Per-device tool builders: one service per build profile
+# (portable/profiles/NAME.env), each running build-tools.sh for it. Output
+# goes to <cache>/tools-out/NAME/ (bin/ and tools.lock).
+#
+# portable/builder.sh build [PROFILE...] [-- ARGS] is the entry point: it
+# builds the images if needed, writes .env (ids, paths) and pulls the Yocto
+# SDK image on the host. After that, `docker compose run --rm pi4 --resolve`
+# and `docker compose up` work too.
+#
+# The services get the host's Docker socket: cross: and STATIC_ALPINE
+# recipes start their own containers. That is root on the host.
+
+name: zsh-builders
+
+x-builder: &builder
+  image: ${BUILDER_IMAGE:-zsh-builder:local}
+  user: "${BUILDER_UID:?run portable/builder.sh build first}:${BUILDER_GID:?}"
+  group_add:
+    - "${DOCKER_GID:?}"
+  # The repo at its host path: inner docker runs mount paths under it.
+  working_dir: ${REPO_DIR:?}
+  volumes:
+    - ${REPO_DIR}:${REPO_DIR}
+    - ${CHEZMOI_SRC:?}:/chezmoi
+    - ${ZSH_PORTABLE_CACHE:?}:${ZSH_PORTABLE_CACHE}
+    - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+  environment:
+    CHEZMOI_SRC: /chezmoi
+    ZSH_PORTABLE_CACHE: ${ZSH_PORTABLE_CACHE}
+    XDG_CACHE_HOME: ${ZSH_PORTABLE_CACHE}/xdg-cache
+    HOME: ${ZSH_PORTABLE_CACHE}/home
+    CARGO_HOME: ${ZSH_PORTABLE_CACHE}/cargo-home
+    ZIG_GLOBAL_CACHE_DIR: ${ZSH_PORTABLE_CACHE}/zig
+    QOS_IMAGE: ${QOS_IMAGE:-registry.example/sdk:latest}
+    # Passed by name from the caller's environment; never in .env.
+    EGET_GITHUB_TOKEN:
+
+services:
+  qos-orin:
+    <<: *builder
+    entrypoint: [portable/build-tools.sh, --profile, qos-orin]
+  pi4:
+    <<: *builder
+    entrypoint: [portable/build-tools.sh, --profile, pi4]
+  x86_64-v3:
+    <<: *builder
+    entrypoint: [portable/build-tools.sh, --profile, x86_64-v3]
+  moto-termux:
+    <<: *builder
+    image: ${ANDROID_BUILDER_IMAGE:-zsh-builder-android:local}
+    entrypoint: [portable/build-tools.sh, --profile, moto-termux]

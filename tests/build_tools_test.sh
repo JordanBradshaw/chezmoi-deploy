@@ -989,17 +989,143 @@ test_feature_install_script_syntax() {
     return 0
 }
 
-# docker_stub: docker that logs one argument per line.
+# docker_stub: docker that logs one argument per line, and fails when its
+# arguments include a word of $STUB_DOCKER_FAIL.
 docker_stub() {
     stubs_setup
-    printf '#!/usr/bin/env bash\nprintf "%%s\\n" docker "$@" >>"$STUB_LOG"\n' >"$STUBS/docker"
+    cat >"$STUBS/docker" <<'EOF'
+#!/usr/bin/env bash
+printf "%s\n" docker "$@" >>"$STUB_LOG"
+for bad in ${STUB_DOCKER_FAIL:-}; do [[ " $* " == *" $bad "* ]] && exit 1; done
+exit 0
+EOF
     chmod +x "$STUBS/docker"
 }
 
 test_builder_image_builds_dockerfile() {
     docker_stub
     PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" image >/dev/null 2>&1
-    assert_eq "$(tr '\n' ' ' <"$STUB_LOG")" "docker build -f $REPO_DIR/features/builder/x86_64.Dockerfile -t zsh-builder:local $REPO_DIR "
+    assert_eq "$(tr '\n' ' ' <"$STUB_LOG")" "docker build -f $REPO_DIR/features/builder/x86_64.Dockerfile -t zsh-builder:local $REPO_DIR docker build -f $REPO_DIR/features/builder/android.Dockerfile --build-arg BASE=zsh-builder:local -t zsh-builder-android:local $REPO_DIR "
+}
+
+# builder_build ARGS: builder.sh build with the docker stub, a small chezmoi
+# tree, the cache in the sandbox and .env written into the sandbox.
+builder_build() {
+    docker_stub
+    mkdir -p "$SANDBOX/cz/apps"
+    cp "$CHEZMOI_SRC/apps/apps.tsv" "$CHEZMOI_SRC/apps/lib.sh" "$SANDBOX/cz/apps/"
+    OUTPUT="$(CHEZMOI_SRC="$SANDBOX/cz" XDG_CACHE_HOME="$SANDBOX/xdg" BUILDER_ENV_FILE="$SANDBOX/.env" \
+        DOCKER_SOCKET="$SANDBOX/docker.sock" PATH="$STUBS:$PATH" "$BASH_BIN" "$BUILDER" build "$@" 2>&1)"
+    STATUS=$?
+}
+
+test_builder_build_writes_env() {
+    : >"$SANDBOX/docker.sock"
+    builder_build pi4
+    assert_eq "$STATUS" 0
+    local cache="$SANDBOX/xdg/zsh-portable" want
+    for want in "BUILDER_UID=$(id -u)" "BUILDER_GID=$(id -g)" "DOCKER_GID=$(stat -c %g "$SANDBOX/docker.sock")" \
+        "DOCKER_SOCKET=$SANDBOX/docker.sock" "REPO_DIR=$REPO_DIR" "CHEZMOI_SRC=$SANDBOX/cz" \
+        "ZSH_PORTABLE_CACHE=$cache" "BUILDER_IMAGE=zsh-builder:local" "ANDROID_BUILDER_IMAGE=zsh-builder-android:local"; do
+        grep -qxF "$want" "$SANDBOX/.env" || fail "no '$want' in .env: $(cat "$SANDBOX/.env")"
+    done
+    [[ -d $cache/home && -d $cache/xdg-cache ]] || fail "cache dirs not created"
+    return 0
+}
+
+test_builder_build_runs_compose_per_profile() {
+    : >"$SANDBOX/docker.sock"
+    builder_build pi4 x86_64-v3 -- --resolve --only rg
+    assert_eq "$STATUS" 0
+    local log
+    log="$(tr '\n' ' ' <"$STUB_LOG")"
+    [[ $log == *"docker compose -f $REPO_DIR/compose.yaml --env-file $SANDBOX/.env run --rm pi4 --resolve --only rg "* ]] ||
+        fail "pi4 run: $log"
+    [[ $log == *"run --rm x86_64-v3 --resolve --only rg "* ]] || fail "x86_64-v3 run: $log"
+    [[ $log == *" pull "* ]] && fail "pulled the SDK image without qos-orin: $log"
+    return 0
+}
+
+test_builder_build_defaults_to_every_profile() {
+    : >"$SANDBOX/docker.sock"
+    builder_build
+    local p
+    for p in moto-termux pi4 qos-orin x86_64-v3; do
+        grep -qx "$p" "$STUB_LOG" || fail "no run of $p: $(tr '\n' ' ' <"$STUB_LOG")"
+    done
+    return 0
+}
+
+# The Yocto SDK image is pulled on the host, with its registry login.
+test_builder_build_pulls_sdk_image_for_qos() {
+    : >"$SANDBOX/docker.sock"
+    QOS_IMAGE=registry.example/yocto:1 builder_build qos-orin
+    grep -qx "pull" "$STUB_LOG" && grep -qx "registry.example/yocto:1" "$STUB_LOG" || fail "no pull: $(tr '\n' ' ' <"$STUB_LOG")"
+    grep -qxF "QOS_IMAGE=registry.example/yocto:1" "$SANDBOX/.env" || fail "QOS_IMAGE not in .env"
+    return 0
+}
+
+test_builder_build_reports_failed_profile() {
+    : >"$SANDBOX/docker.sock"
+    STUB_DOCKER_FAIL=pi4 builder_build pi4 x86_64-v3
+    [[ $STATUS -ne 0 ]] || fail "failure not reported"
+    [[ $OUTPUT == *"failed: pi4"* ]] || fail "no summary: $OUTPUT"
+    grep -qx x86_64-v3 "$STUB_LOG" || fail "stopped after the failure"
+    return 0
+}
+
+test_builder_build_rejects_unknown_profile() {
+    : >"$SANDBOX/docker.sock"
+    builder_build pdp11
+    [[ $STATUS -ne 0 ]] || fail "accepted pdp11"
+    [[ $OUTPUT == *"unknown profile pdp11"* ]] || fail "no message: $OUTPUT"
+    grep -q compose "$STUB_LOG" && fail "compose ran"
+    return 0
+}
+
+test_builder_build_needs_docker_socket() {
+    builder_build pi4
+    [[ $STATUS -ne 0 ]] || fail "ran without a docker socket"
+    [[ $OUTPUT == *"docker.sock"* ]] || fail "no message: $OUTPUT"
+    return 0
+}
+
+test_compose_config_is_valid() {
+    command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || { echo "  skip test_compose_config_is_valid (no docker compose)"; return 0; }
+    printf '%s\n' BUILDER_UID=1000 BUILDER_GID=1000 DOCKER_GID=999 DOCKER_SOCKET=/var/run/docker.sock \
+        "REPO_DIR=$REPO_DIR" CHEZMOI_SRC=/tmp/cz ZSH_PORTABLE_CACHE=/tmp/zp \
+        BUILDER_IMAGE=zsh-builder:local ANDROID_BUILDER_IMAGE=zsh-builder-android:local QOS_IMAGE=q:1 >"$SANDBOX/.env"
+    OUTPUT="$(docker compose -f "$REPO_DIR/compose.yaml" --env-file "$SANDBOX/.env" config 2>&1)" || fail "config: $OUTPUT"
+    OUTPUT="$(docker compose -f "$REPO_DIR/compose.yaml" --env-file "$SANDBOX/.env" config --services 2>&1 | sort | tr '\n' ' ')"
+    assert_eq "$OUTPUT" "moto-termux pi4 qos-orin x86_64-v3 "
+    OUTPUT="$(docker compose -f "$REPO_DIR/compose.yaml" --env-file "$SANDBOX/.env" config --format json)"
+    python3 -c "$(cat <<'EOF'
+import json, sys
+repo = sys.argv[1]
+c = json.load(sys.stdin)["services"]
+for name, s in c.items():
+    assert s["entrypoint"] == ["portable/build-tools.sh", "--profile", name], s["entrypoint"]
+    assert s["working_dir"] == repo, s["working_dir"]
+    assert s["user"] == "1000:1000", s["user"]
+    assert "999" in s["group_add"], s["group_add"]
+    env = s["environment"]
+    assert env["CHEZMOI_SRC"] == "/chezmoi" and env["ZSH_PORTABLE_CACHE"] == "/tmp/zp", env
+    assert "EGET_GITHUB_TOKEN" in env, env
+    targets = {v["target"] for v in s["volumes"]}
+    assert {repo, "/chezmoi", "/tmp/zp", "/var/run/docker.sock"} <= targets, targets
+    want = "zsh-builder-android:local" if name == "moto-termux" else "zsh-builder:local"
+    assert s["image"] == want, (name, s["image"])
+EOF
+)" "$REPO_DIR" <<<"$OUTPUT" || fail "service settings"
+    return 0
+}
+
+test_dockerfiles_pin_downloads() {
+    grep -q 'sha256sum -c' "$REPO_DIR/features/builder/x86_64.Dockerfile" || fail "docker CLI not checksummed"
+    grep -q 'sha1sum -c' "$REPO_DIR/features/builder/android.Dockerfile" || fail "NDK not checksummed"
+    grep -q 'rustup target add aarch64-linux-android' "$REPO_DIR/features/builder/android.Dockerfile" || fail "no android target"
+    grep -qx 'ENV ANDROID_NDK_HOME="/opt/android-ndk"' "$REPO_DIR/features/builder/android.Dockerfile" || fail "no ANDROID_NDK_HOME"
+    return 0
 }
 
 test_builder_run_mounts_repo_and_cache() {
