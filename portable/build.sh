@@ -2,12 +2,16 @@
 #
 # Build a self-contained zsh bundle for another machine or a devcontainer.
 #
-# Usage: build.sh --arch ARCH [--target zssh|dev] [--chezmoi DIR] [--force] [--refresh] [--strict] [--out DIR]
+# Usage: build.sh --arch ARCH [--target zssh|dev] [--profile NAME] [--chezmoi DIR] [--force] [--refresh] [--strict] [--out DIR]
 #
 #   ARCH is the target's `uname -m` (aarch64, arm64, armv7l, x86_64).
 #   --target picks the bundle (default zssh): zssh is for hosts reached over
 #   ssh, dev for devcontainers. Each takes the manifest rows whose portable
 #   column lists it.
+#   --profile NAME (profiles/NAME.env, whose arch must be ARCH) takes each
+#   tool from build-tools.sh's output for NAME (tools-out/NAME/bin) when it
+#   is there, the rest as usual, into zsh-portable-NAME.tar.gz. Without that
+#   output it warns and builds the ARCH bundle.
 #   Prints the path of the bundle on the last line of stdout (zssh:
 #   zsh-portable-ARCH.tar.gz, dev: zsh-portable-dev-ARCH.tar.gz); progress
 #   goes to stderr. A matching .version file holds the
@@ -197,12 +201,13 @@ repo_rev() {
     echo "$sha"
 }
 
-# build_info CHEZMOI DEPLOY ARCH TARGET: the BUILDINFO text.
+# build_info CHEZMOI DEPLOY ARCH TARGET [PROFILE]: the BUILDINFO text.
 build_info() {
     echo "chezmoi $(repo_rev "$1" home apps)"
     echo "deploy $(repo_rev "$2" portable)"
     echo "arch $3"
     echo "target $4"
+    [[ -z ${5:-} ]] || echo "profile $5"
     echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
@@ -291,14 +296,20 @@ strip_debug() {
 # can't build, and are cached in built/ARCH with their recipe_stamp (CI
 # caches that dir); the rest come from their release, cached in tools/ARCH.
 # Tools that can't be had are warned about and listed in MISSING_TOOLS.
+# PREBUILT, a profile's tools-out bin dir, is tried first per tool.
 fetch_tools() {
-    local arch=$1 dest=$2 target=$3
+    local arch=$1 dest=$2 target=$3 prebuilt=${4:-}
     local dir name release build kind stamp
     MISSING_TOOLS=""
     mkdir -p "$dest"
     apps_load || die "could not read the app manifest"
 
     for name in $(apps_names --portable "$target"); do
+        if [[ -n $prebuilt && -f $prebuilt/$name && $(elf_arch "$prebuilt/$name" 2>/dev/null) == "$arch" ]]; then
+            cp "$prebuilt/$name" "$dest/$name"
+            chmod +x "$dest/$name"
+            continue
+        fi
         build="$(app "$name" build)"
         release="$(app "$name" release)"
         kind="" stamp="" dir="$CACHE/tools/$arch"
@@ -420,19 +431,20 @@ export_dotfiles() {
 }
 
 usage() {
-    sed -n '3,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
     set -euo pipefail
 
-    local arch="" target=zssh force="" out="" chezmoi="" strict=""
+    local arch="" target=zssh force="" out="" chezmoi="" strict="" profile=""
     REFRESH=""
     MISSING_TOOLS=""
     while (( $# )); do
         case $1 in
             --arch) arch=${2:-}; shift 2 ;;
             --target) target=${2:-}; shift 2 ;;
+            --profile) profile=${2:-}; shift 2 ;;
             --force) force=1; shift ;;
             --refresh) REFRESH=1; force=1; shift ;;
             --strict) strict=1; shift ;;
@@ -451,16 +463,37 @@ main() {
     DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
     CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/zsh-portable"
     out="${out:-$CACHE/dist}"
+
+    # --profile P: the tools build-tools.sh tuned for P (tools-out/P), when
+    # there are any; without them the generic arch bundle.
+    local prebuilt="" profile_lock=""
+    if [[ -n $profile ]]; then
+        local profile_arch
+        [[ $profile =~ ^[a-z0-9_-]+$ && -f $SCRIPT_DIR/profiles/$profile.env ]] || die "unknown profile $profile"
+        # shellcheck source=/dev/null
+        profile_arch="$(source "$SCRIPT_DIR/profiles/$profile.env" && echo "$PROFILE_ARCH")"
+        [[ $profile_arch == "$arch" ]] || die "profile $profile is for $profile_arch, not $arch"
+        profile_lock="$CACHE/tools-out/$profile/tools.lock"
+        if [[ -f $profile_lock ]]; then
+            prebuilt="$CACHE/tools-out/$profile/bin"
+        else
+            log "warning: no tuned tools for $profile ($profile_lock missing; run builder.sh build $profile), building the $arch bundle"
+            profile="" profile_lock=""
+        fi
+    fi
     mkdir -p "$out"
 
-    local base="zsh-portable-$arch"
-    [[ $target == zssh ]] || base="zsh-portable-$target-$arch"
+    local base="zsh-portable-${profile:-$arch}"
+    [[ $target == zssh ]] || base="zsh-portable-$target-${profile:-$arch}"
     local bundle="$out/$base.tar.gz"
     local stamp_file="$out/$base.stamp"
     local version_file="$out/$base.version"
     local stamp
     YUPPS_DIR="$(yupps_dir)"
     stamp="$(input_stamp "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$target" "$YUPPS_DIR")"
+    if [[ -n $profile ]]; then
+        stamp="$({ echo "$stamp profile $profile"; cat "$profile_lock"; } | sha256sum | cut -d' ' -f1)"
+    fi
     if [[ -z $force && -s $bundle && -s $version_file \
         && $(cat "$stamp_file" 2>/dev/null) == "$stamp" ]]; then
         log "up to date: $bundle"
@@ -473,14 +506,14 @@ main() {
     trap "rm -rf '$tmp'" EXIT
     local app="$tmp/app"
 
-    log "building $target $arch bundle"
+    log "building $target ${profile:-$arch} bundle"
     export_dotfiles "$app/home" "$tmp"
     local plugins="$app/home/.config/zsh/.zsh_plugins.txt"
     filter_plugins <"$plugins" >"$plugins.tmp" && mv "$plugins.tmp" "$plugins"
     fetch_git_externals "$app/home" "$tmp"
     fetch_plugins "$app/home/.config/zsh/.antidote" "$plugins" "$app/antidote"
     fetch_zsh "$arch" "$app/zsh"
-    fetch_tools "$arch" "$app/bin" "$target"
+    fetch_tools "$arch" "$app/bin" "$target" "$prebuilt"
     [[ -z $strict || -z $MISSING_TOOLS ]] || die "missing tools: $MISSING_TOOLS"
     cp "$SCRIPT_DIR/remote/setup.sh" "$SCRIPT_DIR/remote/enter" "$app/"
     chmod +x "$app/setup.sh" "$app/enter"
@@ -491,7 +524,7 @@ main() {
     local version
     version="$(tree_hash "$app")"
     echo "$version" >"$app/VERSION"
-    build_info "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$target" >"$app/BUILDINFO"
+    build_info "$CHEZMOI_SRC" "$DEPLOY_DIR" "$arch" "$target" "$profile" >"$app/BUILDINFO"
     # Owned by root in the archive, so root unpacking it on a host doesn't
     # leave files writable by whoever has this machine's uid there.
     tar --owner=0 --group=0 --numeric-owner -czf "$bundle.tmp" -C "$app" .

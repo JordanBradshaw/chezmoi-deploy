@@ -289,6 +289,118 @@ test_target_selects_rows() {
     [[ ! -e $SANDBOX/dbin/fake ]] || fail "zssh-only row in dev"
 }
 
+# fetch_tools' 4th argument: a profile's prebuilt bin dir, preferred per tool.
+test_fetch_tools_prefers_profile_bin() {
+    fake_cross_env
+    mkdir -p "$SANDBOX/pre"
+    fake_elf "$SANDBOX/pre/fake" 2 183
+    echo tuned >>"$SANDBOX/pre/fake"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh "$SANDBOX/pre" 2>&1)"
+    refute_call_matches "^cross"
+    grep -q tuned "$SANDBOX/bin/fake" || fail "not taken from the profile bin"
+    [[ -x $SANDBOX/bin/fake ]] || fail "not executable"
+}
+
+test_fetch_tools_falls_back_per_tool() {
+    fake_cross_env
+    mkdir -p "$SANDBOX/pre"
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh "$SANDBOX/pre" 2>&1)"
+    assert_call_matches "^cross aarch64"
+    assert_eq "$(elf_arch "$SANDBOX/bin/fake")" aarch64
+}
+
+test_fetch_tools_ignores_wrong_arch_profile_bin() {
+    fake_cross_env
+    mkdir -p "$SANDBOX/pre"
+    fake_elf "$SANDBOX/pre/fake" 2 62
+    OUTPUT="$(fetch_tools aarch64 "$SANDBOX/bin" zssh "$SANDBOX/pre" 2>&1)"
+    assert_call_matches "^cross aarch64"
+    assert_eq "$(elf_arch "$SANDBOX/bin/fake")" aarch64
+}
+
+# profile_main ARGS: main with stubbed fetchers; fetch_tools records its
+# 4th argument in the bundle's bin/prebuilt.
+profile_main() {
+    mkrepos
+    (
+        export XDG_CACHE_HOME="$SANDBOX/cache" HOME="$SANDBOX/home"
+        mkdir -p "$HOME" "$SANDBOX/noyupps"
+        fetch_zsh() { mkdir -p "$2"; echo z >"$2/zsh"; }
+        fetch_tools() { mkdir -p "$2"; echo "${4:-none}" >"$2/prebuilt"; }
+        fetch_plugins() { mkdir -p "$3"; echo p >"$3/p"; }
+        fetch_git_externals() { :; }
+        export_dotfiles() { mkdir -p "$1/.config/zsh"; echo plug >"$1/.config/zsh/.zsh_plugins.txt"; }
+        check_secrets() { return 0; }
+        yupps_dir() { echo "$SANDBOX/noyupps"; }
+        main --chezmoi "$CHEZ" --out "$SANDBOX/o" "$@"
+    ) 2>&1
+}
+
+tools_out() {
+    mkdir -p "$SANDBOX/cache/zsh-portable/tools-out/$1/bin"
+    printf '# tools.lock\nrg\tcrate:ripgrep:rg\t%s\tsum\tbuilt\n' "${2:-15.2.0}" \
+        >"$SANDBOX/cache/zsh-portable/tools-out/$1/tools.lock"
+}
+
+test_profile_bundle_uses_tools_out() {
+    tools_out pi4
+    OUTPUT="$(profile_main --arch aarch64 --profile pi4)"
+    STATUS=$?
+    assert_status 0
+    local b="$SANDBOX/o/zsh-portable-pi4.tar.gz"
+    [[ -s $b && -s $SANDBOX/o/zsh-portable-pi4.version && -s $SANDBOX/o/zsh-portable-pi4.stamp ]] ||
+        fail "no pi4 bundle files"
+    assert_eq "$(tail -n1 <<<"$OUTPUT")" "$b"
+    assert_eq "$(tar -xOzf "$b" ./bin/prebuilt)" "$SANDBOX/cache/zsh-portable/tools-out/pi4/bin"
+    assert_eq "$(tar -xOzf "$b" ./BUILDINFO | grep '^profile')" "profile pi4"
+}
+
+test_profile_without_output_builds_arch_bundle() {
+    OUTPUT="$(profile_main --arch aarch64 --profile pi4)"
+    STATUS=$?
+    assert_status 0
+    assert_output_matches "no tuned tools for pi4"
+    local b="$SANDBOX/o/zsh-portable-aarch64.tar.gz"
+    [[ -s $b ]] || fail "no generic bundle"
+    [[ -e $SANDBOX/o/zsh-portable-pi4.tar.gz ]] && fail "pi4 bundle written"
+    assert_eq "$(tar -xOzf "$b" ./bin/prebuilt)" none
+    tar -xOzf "$b" ./BUILDINFO | grep -q '^profile' && fail "profile in BUILDINFO"
+    return 0
+}
+
+# Review Focus 3: a profile for another arch never makes a bundle.
+test_profile_arch_mismatch_fails() {
+    tools_out pi4
+    OUTPUT="$(profile_main --arch x86_64 --profile pi4)"
+    STATUS=$?
+    [[ $STATUS -ne 0 ]] || fail "x86_64 bundle with the pi4 profile"
+    assert_output_matches "profile pi4 is for aarch64, not x86_64"
+    compgen -G "$SANDBOX/o/zsh-portable-*" >/dev/null && fail "bundle files written"
+    return 0
+}
+
+test_unknown_profile_rejected() {
+    OUTPUT="$(profile_main --arch aarch64 --profile pdp11)"
+    STATUS=$?
+    [[ $STATUS -ne 0 ]] || fail "unknown profile accepted"
+    assert_output_matches "unknown profile pdp11"
+    return 0
+}
+
+test_profile_stamp_follows_tools_lock() {
+    tools_out pi4
+    profile_main --arch aarch64 --profile pi4 >/dev/null
+    local first
+    first="$(cat "$SANDBOX/o/zsh-portable-pi4.stamp")"
+    OUTPUT="$(profile_main --arch aarch64 --profile pi4)"
+    assert_output_matches "up to date"
+    tools_out pi4 15.3.0
+    OUTPUT="$(profile_main --arch aarch64 --profile pi4)"
+    assert_output_matches "building zssh pi4 bundle"
+    [[ $(cat "$SANDBOX/o/zsh-portable-pi4.stamp") != "$first" ]] || fail "stamp ignores tools.lock"
+    return 0
+}
+
 test_input_stamp_includes_target() {
     mkrepos
     [[ $(input_stamp "$CHEZ" "$DEP" x86_64 zssh) != $(input_stamp "$CHEZ" "$DEP" x86_64 dev) ]] \
