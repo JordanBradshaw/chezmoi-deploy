@@ -271,6 +271,14 @@ test_alpine_pulls_target_platform_first() {
     grep -q '^docker pull -q --platform linux/arm64 rust:' "$STUB_LOG" || fail "pull: $(cat "$STUB_LOG")"
 }
 
+# The containerd image store keeps every pulled platform under one tag and
+# inspect without --platform reports the host's: ask for the target one.
+test_alpine_inspects_target_platform() {
+    stub_docker
+    sl "STATIC_ALPINE=1 static_run aarch64 '$SANDBOX/out/tool' </dev/null"
+    grep -q '^docker image inspect --platform linux/arm64 ' "$STUB_LOG" || fail "inspect: $(cat "$STUB_LOG")"
+}
+
 test_alpine_refuses_image_for_other_platform() {
     stub_docker
     STUB_IMAGE_PLATFORM=linux/arm/v7 sl "STATIC_ALPINE=1 static_run aarch64 '$SANDBOX/out/tool' </dev/null"

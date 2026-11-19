@@ -167,8 +167,11 @@ static_run() {
             # The classic image store keeps one platform per tag, and run
             # --platform then uses whatever the tag holds: pull for this
             # platform, and refuse a tag still holding another (offline).
+            # The containerd store keeps them all and inspect reports the
+            # host's unless asked for one, hence --platform.
             docker pull -q --platform "$platform" "$STATIC_ALPINE_IMAGE" >/dev/null 2>&1 || true
-            got="$(docker image inspect -f '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' \
+            got="$(docker image inspect --platform "$platform" \
+                -f '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' \
                 "$STATIC_ALPINE_IMAGE" 2>/dev/null)"
             if [[ ${got%/v8} != "$platform" ]]; then
                 echo "static: $STATIC_ALPINE_IMAGE is ${got:-missing}, not $platform" >&2
