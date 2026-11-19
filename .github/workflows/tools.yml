@@ -1,0 +1,166 @@
+name: tools
+
+# Per-device tool builds (portable/profiles/*.env), one job per profile, the
+# same way `portable/builder.sh build` runs them locally (compose.yaml).
+# Verified binaries are cached per profile, so a rerun only builds what
+# changed. Each job uploads tools-<profile> (bin/ and tools.lock); the
+# bundle jobs upload zsh-portable-<profile> (the zssh bundle).
+#
+# Not here: cross: recipes (qos-orin's tmux, nvtop) need the Yocto SDK image
+# from the private registry; those tools fall back as they do offline.
+#
+# Into the local cache:
+#   gh run download RUN -n tools-pi4 -D ~/.cache/zsh-portable/tools-out/pi4
+#   gh run download RUN -n zsh-portable-pi4 -D ~/.cache/zsh-portable/prebuilt
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: Profiles, comma-separated
+        default: qos-orin,pi4,x86_64-v3,moto-termux
+      resolve:
+        description: Resolve latest versions (--resolve; the new lock is in the artifact)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tools-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      profiles: ${{ steps.m.outputs.profiles }}
+      bundles: ${{ steps.m.outputs.bundles }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        env:
+          PROFILES: ${{ inputs.profiles }}
+        run: |
+          python3 - <<'EOF' >>"$GITHUB_OUTPUT"
+          import json, os, sys
+          want = [p.strip() for p in os.environ["PROFILES"].split(",") if p.strip()]
+          known = sorted(f[:-4] for f in os.listdir("portable/profiles") if f.endswith(".env"))
+          bad = [p for p in want if p not in known]
+          if bad:
+              sys.exit(f"unknown profiles: {bad} (known: {known})")
+          print("profiles=" + json.dumps(want))
+          # moto-termux tools are copied to the phone as they are; no bundle.
+          print("bundles=" + json.dumps([p for p in want if p != "moto-termux"]))
+          EOF
+
+  tools:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.setup.outputs.profiles) }}
+    env:
+      EGET_GITHUB_TOKEN: ${{ github.token }}
+      CHEZMOI_SRC: ${{ github.workspace }}/chezmoi
+    steps:
+      # cargo's target dirs need far more than the runner's free space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/chezmoi
+          ref: main
+          path: chezmoi
+      # STATIC_ALPINE recipes (strace, below) run an aarch64 Alpine, and
+      # iftop's configure runs what it compiles.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+      - name: Builder image
+        run: docker build -f features/builder/x86_64.Dockerfile -t zsh-builder:local .
+      - name: Android builder image
+        if: matrix.profile == 'moto-termux'
+        run: docker build -f features/builder/android.Dockerfile --build-arg BASE=zsh-builder:local -t zsh-builder-android:local .
+      - name: Restore built tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zsh-portable/tools/${{ matrix.profile }}
+            ~/.cache/zsh-portable/static-src
+          key: tools-${{ matrix.profile }}-${{ github.run_id }}
+          restore-keys: tools-${{ matrix.profile }}-
+      - name: Build
+        run: |
+          args=()
+          [[ '${{ inputs.resolve }}' == true ]] && args=(-- --resolve)
+          bash portable/builder.sh build '${{ matrix.profile }}' "${args[@]}"
+      - name: Lock
+        if: always()
+        run: |
+          out=~/.cache/zsh-portable/tools-out/'${{ matrix.profile }}'
+          cp chezmoi/apps/locks/'${{ matrix.profile }}'.lock "$out/" 2>/dev/null || true
+          cat "$out/tools.lock" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tools-${{ matrix.profile }}
+          path: ~/.cache/zsh-portable/tools-out/${{ matrix.profile }}
+          if-no-files-found: error
+          retention-days: 14
+
+  bundles:
+    needs: [setup, tools]
+    if: always() && needs.setup.outputs.bundles != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.setup.outputs.bundles) }}
+    env:
+      EGET_GITHUB_TOKEN: ${{ github.token }}
+      CHEZMOI_SRC: ${{ github.workspace }}/chezmoi
+      ZSSH_YUPPS_DIR: ${{ github.workspace }}/yupps-zsh
+    steps:
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y zsh python3 binutils
+      - name: Install chezmoi and eget
+        run: |
+          mkdir -p ~/.local/bin
+          sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
+          (cd /tmp && curl -fsSL https://zyedidia.github.io/eget.sh | sh && mv /tmp/eget ~/.local/bin/)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/chezmoi
+          ref: main
+          path: chezmoi
+      - uses: actions/checkout@v4
+        with:
+          repository: JordanBradshaw/yupps-zsh
+          path: yupps-zsh
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+      - uses: actions/download-artifact@v4
+        with:
+          name: tools-${{ matrix.profile }}
+          path: ~/.cache/zsh-portable/tools-out/${{ matrix.profile }}
+      - name: Bundle
+        run: |
+          chmod +x ~/.cache/zsh-portable/tools-out/'${{ matrix.profile }}'/bin/*
+          arch="$(source portable/profiles/'${{ matrix.profile }}'.env && echo "$PROFILE_ARCH")"
+          bash portable/build.sh --profile '${{ matrix.profile }}' --arch "$arch" --out "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zsh-portable-${{ matrix.profile }}
+          path: ${{ runner.temp }}/dist/zsh-portable-${{ matrix.profile }}.*
+          if-no-files-found: error
+          retention-days: 14
