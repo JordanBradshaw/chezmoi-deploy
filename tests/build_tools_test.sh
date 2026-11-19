@@ -21,7 +21,7 @@ setup() {
     SANDBOX="$(mktemp -d)"
     export SANDBOX
     unset APPS_FILE LOCKS_DIR XDG_CACHE_HOME CROSS_DIR STATIC_DIR FIXTURES STUB_LOG STUB_CURL_FAIL STUB_DIE EGET_GITHUB_TOKEN \
-        STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF
+        STUB_ELF_ARCH STUB_GO_CROSS STUB_CARGO_FAIL STUB_EGET_FAIL MAKE_ELF ANDROID_NDK_HOME
     OUTPUT=""
     STATUS=0
 }
@@ -67,6 +67,27 @@ test_load_profile_x86_64_v3() {
 test_load_profile_qos_orin() {
     bt 'load_profile qos-orin && printf "%s|" "$PROFILE_NAME" "$PROFILE_ARCH" "$RUST_TARGET" "$RUST_CPU" "$GO_ENV" "$NEEDS_SDK"'
     assert_eq "$OUTPUT" "qos-orin|aarch64|aarch64-unknown-linux-gnu.2.39|cortex-a78ae|GOARCH=arm64 CGO_ENABLED=0|1|"
+}
+
+test_load_profile_pi4() {
+    bt 'load_profile pi4 && printf "%s|" "$PROFILE_ARCH" "$RUST_TARGET" "$RUST_CPU" "$GO_ENV" "$NEEDS_SDK" "$CARGO_DRIVER" "$NATIVE_ONLY" "$DETECT_CPU_PART"'
+    assert_eq "$OUTPUT" "aarch64|aarch64-unknown-linux-gnu.2.36|cortex-a72|GOARCH=arm64 CGO_ENABLED=0|0|zigbuild|0|0xd08|"
+}
+
+test_load_profile_moto_termux() {
+    bt 'load_profile moto-termux && printf "%s|" "$PROFILE_ARCH" "$RUST_TARGET" "$RUST_CPU" "$GO_ENV" "$NEEDS_SDK" "$CARGO_DRIVER" "$ANDROID_API" "$NATIVE_ONLY" "${DETECT_CPU_PART:-}${DETECT_X86_FLAGS:-}"'
+    assert_eq "$OUTPUT" "aarch64|aarch64-linux-android|cortex-a55|GOOS=android GOARCH=arm64 CGO_ENABLED=1|0|ndk|24|1||"
+}
+
+test_detect_fields_of_existing_profiles() {
+    bt 'load_profile qos-orin && echo "$DETECT_CPU_PART|${DETECT_X86_FLAGS:-}"; load_profile x86_64-v3 && echo "${DETECT_CPU_PART:-}|$DETECT_X86_FLAGS"'
+    assert_eq "$OUTPUT" $'0xd42|\n|avx2 bmi2 fma'
+}
+
+# A field set by one profile must not leak into the next one loaded.
+test_profile_fields_reset_between_loads() {
+    bt 'load_profile moto-termux; load_profile x86_64-v3; printf "%s|" "$CARGO_DRIVER" "$NATIVE_ONLY" "${ANDROID_API:-}" "${DETECT_CPU_PART:-}"'
+    assert_eq "$OUTPUT" "zigbuild|0|||"
 }
 
 test_unknown_profile_fails() {
@@ -351,6 +372,7 @@ recipe_stubs() {
 eval "$MAKE_ELF"
 echo "cargo $* [in ${PWD##*/}]" >>"$STUB_LOG"
 echo "cargo-env RUSTFLAGS=$RUSTFLAGS LTO=$CARGO_PROFILE_RELEASE_LTO CGU=$CARGO_PROFILE_RELEASE_CODEGEN_UNITS STRIP=${CARGO_PROFILE_RELEASE_STRIP:-} TOOLCHAIN=${RUSTUP_TOOLCHAIN:-}" >>"$STUB_LOG"
+echo "cargo-ndk LINKER=${CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER:-} CC=${CC_aarch64_linux_android:-} AR=${AR_aarch64_linux_android:-} TOKEN=${EGET_GITHUB_TOKEN:-}" >>"$STUB_LOG"
 [[ -n ${STUB_CARGO_FAIL:-} ]] && exit 101
 target="" bin=""
 while (( $# )); do
@@ -365,10 +387,11 @@ EOF
 eval "$MAKE_ELF"
 echo "go $*" >>"$STUB_LOG"
 echo "go-env GOOS=$GOOS GOARCH=$GOARCH GOAMD64=${GOAMD64:-} CGO_ENABLED=$CGO_ENABLED" >>"$STUB_LOG"
+echo "go-cc CC=${CC:-}" >>"$STUB_LOG"
 pkg="${@: -1}"; pkg=${pkg%@*}; name=${pkg##*/}
 [[ $name =~ ^v[0-9]+$ ]] && { pkg=${pkg%/*}; name=${pkg##*/}; }
 dir="$GOPATH/bin"
-[[ -n ${STUB_GO_CROSS:-} ]] && dir="$GOPATH/bin/linux_$GOARCH"
+[[ -n ${STUB_GO_CROSS:-} ]] && dir="$GOPATH/bin/${GOOS}_$GOARCH"
 mkdir -p "$dir"
 make_elf "${STUB_ELF_ARCH:-x86_64}" "$dir/$name"
 EOF
@@ -480,6 +503,62 @@ test_go_cross_binary_found_in_goarch_dir() {
     return 0
 }
 
+# ndk_stub: a fake NDK (ANDROID_NDK_HOME) with the API 24 clang and llvm-ar.
+ndk_stub() {
+    export ANDROID_NDK_HOME="$SANDBOX/ndk"
+    NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    mkdir -p "$NDK_BIN"
+    local f
+    for f in aarch64-linux-android24-clang aarch64-linux-android24-clang++ llvm-ar; do
+        printf '#!/bin/sh\nexit 0\n' >"$NDK_BIN/$f"
+        chmod +x "$NDK_BIN/$f"
+    done
+}
+
+test_crate_ndk_driver_uses_plain_cargo_and_ndk_linker() {
+    recipe_stubs
+    ndk_stub
+    crate_fixture ripgrep 15.2.0
+    STUB_ELF_ARCH=aarch64 EGET_GITHUB_TOKEN=secret btp 'load_profile moto-termux; build_recipe rg crate:ripgrep:rg BurntSushi/ripgrep rg - 15.2.0 "$SANDBOX/out/rg"'
+    assert_eq "$STATUS" 0
+    grep -qx "cargo build --release --locked --target aarch64-linux-android --bin rg \[in ripgrep-15.2.0\]" "$STUB_LOG" ||
+        fail "cargo call: $(cat "$STUB_LOG")"
+    grep -qx "cargo-env RUSTFLAGS=-C target-cpu=cortex-a55 LTO=fat CGU=1 STRIP=symbols TOOLCHAIN=stable" "$STUB_LOG" ||
+        fail "cargo env: $(cat "$STUB_LOG")"
+    grep -qx "cargo-ndk LINKER=$NDK_BIN/aarch64-linux-android24-clang CC=$NDK_BIN/aarch64-linux-android24-clang AR=$NDK_BIN/llvm-ar TOKEN=" "$STUB_LOG" ||
+        fail "ndk env: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/rg ]] || fail "no binary"
+    return 0
+}
+
+test_crate_ndk_driver_without_ndk_fails() {
+    recipe_stubs
+    crate_fixture ripgrep 15.2.0
+    ANDROID_NDK_HOME="$SANDBOX/nope" btp 'load_profile moto-termux; build_recipe rg crate:ripgrep:rg BurntSushi/ripgrep rg - 15.2.0 "$SANDBOX/out/rg"'
+    [[ $STATUS -ne 0 ]] || fail "built without an NDK"
+    [[ $OUTPUT == *"no Android NDK"* ]] || fail "no reason: $OUTPUT"
+    grep -q '^cargo ' "$STUB_LOG" && fail "cargo ran"
+    return 0
+}
+
+test_go_android_keeps_goos_and_ndk_cc() {
+    recipe_stubs
+    ndk_stub
+    STUB_GO_CROSS=1 STUB_ELF_ARCH=aarch64 btp 'load_profile moto-termux; build_recipe fzf go:github.com/junegunn/fzf junegunn/fzf fzf - v0.66.0 "$SANDBOX/out/fzf"'
+    assert_eq "$STATUS" 0
+    grep -qx "go-env GOOS=android GOARCH=arm64 GOAMD64= CGO_ENABLED=1" "$STUB_LOG" || fail "go env: $(cat "$STUB_LOG")"
+    grep -qx "go-cc CC=$NDK_BIN/aarch64-linux-android24-clang" "$STUB_LOG" || fail "go cc: $(cat "$STUB_LOG")"
+    [[ -x $SANDBOX/out/fzf ]] || fail "binary in bin/android_arm64 not found"
+    return 0
+}
+
+test_go_linux_gets_no_cc() {
+    recipe_stubs
+    btp 'load_profile x86_64-v3; build_recipe fzf go:github.com/junegunn/fzf junegunn/fzf fzf - v0.66.0 "$SANDBOX/out/fzf"'
+    grep -qx "go-cc CC=" "$STUB_LOG" || fail "CC set: $(cat "$STUB_LOG")"
+    return 0
+}
+
 test_cross_needs_sdk_profile() {
     recipe_stubs
     printf '#!/usr/bin/env bash\necho "cross $*" >>"$STUB_LOG"\nprintf x >"$2"\n' >"$CROSS_DIR/tmux.sh"
@@ -525,7 +604,8 @@ readelf_stub() {
     cat >"$STUBS/readelf" <<'EOF'
 #!/usr/bin/env bash
 case $1 in
-    -lW) [[ -n ${STUB_READELF_INTERP:-} ]] && echo "  INTERP         0x000318 0x0000000000000318" ;;
+    -lW) [[ -n ${STUB_READELF_INTERP:-} ]] && echo "  INTERP         0x000318 0x0000000000000318" &&
+        echo "      [Requesting program interpreter: $STUB_READELF_INTERP]" ;;
     -VW) for v in ${STUB_READELF_GLIBC:-}; do echo "  0x0010:   Name: GLIBC_$v  Flags: none  Version: 2"; done ;;
 esac
 exit 0
@@ -639,6 +719,59 @@ test_verify_rejects_glibc_above_2_39_for_qos() {
     [[ $STATUS -ne 0 ]] || fail "GLIBC_2.41 accepted for glibc 2.39"
     [[ $OUTPUT == *"GLIBC_2.41"* ]] || fail "no reason: $OUTPUT"
     return 0
+}
+
+test_verify_android_accepts_linker64_and_static() {
+    main_stubs "$RG_ONLY"
+    make_elf aarch64 "$SANDBOX/bin"
+    STUB_READELF_INTERP=/system/bin/linker64 STUB_READELF_GLIBC="" btp "load_profile moto-termux; verify_binary '$SANDBOX/bin'"
+    assert_eq "$STATUS" 0
+    STUB_READELF_INTERP="" btp "load_profile moto-termux; verify_binary '$SANDBOX/bin'"
+    assert_eq "$STATUS" 0
+}
+
+test_verify_android_rejects_glibc_interpreter() {
+    main_stubs "$RG_ONLY"
+    make_elf aarch64 "$SANDBOX/bin"
+    STUB_READELF_INTERP=/lib/ld-linux-aarch64.so.1 btp "load_profile moto-termux; verify_binary '$SANDBOX/bin'"
+    [[ $STATUS -ne 0 ]] || fail "glibc binary accepted for Android"
+    [[ $OUTPUT == *"ld-linux-aarch64.so.1"* ]] || fail "no reason: $OUTPUT"
+    return 0
+}
+
+# Review Focus 5: a NATIVE_ONLY profile ships only crate: and go: builds.
+test_native_only_skips_release_and_static_rows() {
+    ndk_stub
+    main_stubs 'rg    BurntSushi/ripgrep  rg    musl|gnu  crate:ripgrep:rg
+lnav  tstack/lnav         lnav  musl      release
+htop  htop-dev/htop       htop  -         static:htop'
+    printf 'rg\tcrate:ripgrep:rg\t15.2.0\nlnav\trelease\tv0.14.1\n' >"$LOCKS_DIR/moto-termux.lock"
+    crate_fixture ripgrep 15.2.0
+    STUB_ELF_ARCH=aarch64 btp 'main --profile moto-termux --out "$SANDBOX/out"'
+    assert_eq "$STATUS" 0
+    [[ -x $SANDBOX/out/bin/rg ]] || fail "no rg: $OUTPUT"
+    [[ -e $SANDBOX/out/bin/lnav || -e $SANDBOX/out/bin/htop ]] && fail "non-native tool shipped"
+    grep -q '^eget ' "$STUB_LOG" && fail "release fetched: $(cat "$STUB_LOG")"
+    [[ $OUTPUT == *"not native"*lnav* ]] || fail "skip not reported: $OUTPUT"
+    return 0
+}
+
+test_native_only_never_falls_back_to_release() {
+    ndk_stub
+    main_stubs "$RG_ONLY"
+    printf "$RG_LOCK" >"$LOCKS_DIR/moto-termux.lock"
+    crate_fixture ripgrep 15.2.0
+    STUB_CARGO_FAIL=1 STUB_ELF_ARCH=aarch64 btp 'main --profile moto-termux --out "$SANDBOX/out"'
+    assert_eq "$STATUS" 0
+    grep -q '^eget ' "$STUB_LOG" && fail "release fallback used: $(cat "$STUB_LOG")"
+    [[ -e $SANDBOX/out/bin/rg ]] && fail "rg shipped"
+    return 0
+}
+
+test_recipe_hash_differs_per_cargo_driver() {
+    main_stubs "$RG_ONLY"
+    btp 'load_profile x86_64-v3; load_tools; a=$(recipe_hash rg); CARGO_DRIVER=ndk; b=$(recipe_hash rg); [[ $a != "$b" ]] && echo differs'
+    assert_eq "$OUTPUT" "differs"
 }
 
 test_built_tool_lands_in_out_and_cache() {

@@ -67,17 +67,39 @@ usage() {
 }
 
 # load_profile NAME: set PROFILE_NAME PROFILE_ARCH RUST_TARGET RUST_CPU
-# GO_ENV NEEDS_SDK from profiles/NAME.env.
+# GO_ENV NEEDS_SDK from profiles/NAME.env, and the optional CARGO_DRIVER
+# (zigbuild, or ndk for Android), ANDROID_API, NATIVE_ONLY (1: ship only
+# crate: and go: builds), DETECT_CPU_PART and DETECT_X86_FLAGS (for
+# pick-profile.sh).
 load_profile() {
     local file="$PROFILES_DIR/$1.env"
     if [[ ! $1 =~ ^[a-z0-9_-]+$ || ! -f $file ]]; then
         echo "build-tools: unknown profile $1" >&2
         return 1
     fi
-    unset PROFILE_ARCH RUST_TARGET RUST_CPU GO_ENV NEEDS_SDK
+    unset PROFILE_ARCH RUST_TARGET RUST_CPU GO_ENV NEEDS_SDK CARGO_DRIVER ANDROID_API NATIVE_ONLY \
+        DETECT_CPU_PART DETECT_X86_FLAGS
     # shellcheck source=/dev/null
     source "$file"
+    CARGO_DRIVER=${CARGO_DRIVER:-zigbuild}
+    NATIVE_ONLY=${NATIVE_ONLY:-0}
     PROFILE_NAME=$1
+}
+
+# native_source SOURCE: whether SOURCE is built here from source (crate:, go:).
+native_source() {
+    [[ $1 == crate:* || $1 == go:* ]]
+}
+
+# ndk_bin: the Android NDK's toolchain bin dir (ANDROID_NDK_HOME, as the
+# android builder image sets it); fails without one.
+ndk_bin() {
+    local bin="${ANDROID_NDK_HOME:-/opt/android-ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    if [[ ! -x $bin/aarch64-linux-android${ANDROID_API}-clang ]]; then
+        log "no Android NDK at ${ANDROID_NDK_HOME:-/opt/android-ndk} (use the zsh-builder-android image)"
+        return 1
+    fi
+    echo "$bin"
 }
 
 # rust_target_dir: the Rust target without zigbuild's glibc suffix, as used
@@ -95,6 +117,7 @@ selected() {
 # NAMES (file order) for the ones --only selects.
 load_tools() {
     local name build
+    local -a dropped=()
     NAMES=()
     apps_load "$APPS_FILE" || die "cannot read the manifest"
     while read -r name; do
@@ -102,8 +125,17 @@ load_tools() {
         [[ $build == - ]] && build=release
         REPOS[$name]=$(app "$name" release) FILES[$name]=$(app "$name" file)
         SPECS[$name]=$(app "$name" assets) SOURCES[$name]=$build
-        if selected "$name"; then NAMES+=("$name"); fi
+        selected "$name" || continue
+        if [[ ${NATIVE_ONLY:-0} == 1 ]] && ! native_source "$build"; then
+            dropped+=("$name")
+            continue
+        fi
+        NAMES+=("$name")
     done < <(apps_names --portable zssh)
+    if (( ${#dropped[@]} )); then
+        log "skipping for $PROFILE_NAME (not native builds): ${dropped[*]}"
+    fi
+    return 0
 }
 
 # http_get URL: print the body of URL. Fails with 4 for a 404 (e.g. a repo
@@ -268,11 +300,25 @@ build_crate() {
     fi
     dir="$work/$crate-$version"
     [[ -f $dir/Cargo.lock ]] || locked=()
-    local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME"
-    if (cd "$dir" && env -u EGET_GITHUB_TOKEN RUSTFLAGS="-C target-cpu=$RUST_CPU" \
+    local target_dir="$CACHE_ROOT/cargo-target/$PROFILE_NAME" ndk triple
+    # zigbuild links with zig; ndk with the NDK's clang for the API level.
+    local -a cargo=(cargo zigbuild) driver_env=()
+    if [[ $CARGO_DRIVER == ndk ]]; then
+        ndk="$(ndk_bin)" || { rm -rf "$work"; return 1; }
+        triple=$(rust_target_dir)
+        triple=${triple//-/_}
+        cargo=(cargo build)
+        driver_env=(
+            "CARGO_TARGET_${triple^^}_LINKER=$ndk/aarch64-linux-android${ANDROID_API}-clang"
+            "CC_$triple=$ndk/aarch64-linux-android${ANDROID_API}-clang"
+            "CXX_$triple=$ndk/aarch64-linux-android${ANDROID_API}-clang++"
+            "AR_$triple=$ndk/llvm-ar"
+        )
+    fi
+    if (cd "$dir" && env -u EGET_GITHUB_TOKEN "${driver_env[@]}" RUSTFLAGS="-C target-cpu=$RUST_CPU" \
         CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
         CARGO_PROFILE_RELEASE_STRIP=symbols CARGO_TARGET_DIR="$target_dir" RUSTUP_TOOLCHAIN=stable \
-        cargo zigbuild --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
+        "${cargo[@]}" --release "${locked[@]}" --target "$RUST_TARGET" --bin "$bin" "${extra[@]}" >&2) \
         && install -D -m755 "$target_dir/$(rust_target_dir)/release/$bin" "$out"; then
         rm -rf "$work"
         return 0
@@ -282,25 +328,32 @@ build_crate() {
 }
 
 # build_go NAME SOURCE VERSION OUT: go install the module (or its //SUBPKG)
-# for the profile's GOARCH, stripped and without build paths.
+# for the profile's GOOS (default linux) and GOARCH, stripped and without
+# build paths. Android builds use cgo with the NDK's clang.
 build_go() {
-    local name=$1 source=$2 version=$3 out=$4 pkg bin gopath goarch=""
-    local -a goenv=()
+    local name=$1 source=$2 version=$3 out=$4 pkg bin gopath goarch="" goos=linux ndk v
+    local -a goenv=() cc=()
     pkg=${source#go:}
     pkg=${pkg/\/\//\/}
     bin=${pkg##*/}
     # Major-version suffixes (/v2) aren't part of the binary name.
     [[ $bin =~ ^v[0-9]+$ ]] && { bin=${pkg%/*}; bin=${bin##*/}; }
     read -r -a goenv <<<"$GO_ENV"
-    for v in "${goenv[@]}"; do [[ $v == GOARCH=* ]] && goarch=${v#GOARCH=}; done
+    for v in "${goenv[@]}"; do
+        case $v in GOARCH=*) goarch=${v#GOARCH=} ;; GOOS=*) goos=${v#GOOS=} ;; esac
+    done
+    if [[ $goos == android ]]; then
+        ndk="$(ndk_bin)" || return 1
+        cc=("CC=$ndk/aarch64-linux-android${ANDROID_API}-clang")
+    fi
     mkdir -p "$CACHE_ROOT/tmp"
     gopath="$(mktemp -d "$CACHE_ROOT/tmp/go.XXXXXX")"
-    if env -u EGET_GITHUB_TOKEN GOPATH="$gopath" GOMODCACHE="$CACHE_ROOT/gomod" GOCACHE="$CACHE_ROOT/gobuild" \
-        GOFLAGS=-modcacherw GOOS=linux "${goenv[@]}" \
+    if env -u EGET_GITHUB_TOKEN -u CC GOPATH="$gopath" GOMODCACHE="$CACHE_ROOT/gomod" GOCACHE="$CACHE_ROOT/gobuild" \
+        GOFLAGS=-modcacherw GOOS=linux "${goenv[@]}" "${cc[@]}" \
         go install -trimpath "-ldflags=-s -w" "$pkg@$version" >&2; then
-        # Cross builds land in bin/linux_GOARCH.
+        # Cross builds land in bin/GOOS_GOARCH.
         local f
-        for f in "$gopath/bin/$bin" "$gopath/bin/linux_$goarch/$bin"; do
+        for f in "$gopath/bin/$bin" "$gopath/bin/${goos}_$goarch/$bin"; do
             if [[ -f $f ]]; then
                 install -D -m755 "$f" "$out"
                 rm -rf "$gopath"
@@ -340,11 +393,19 @@ build_recipe() {
 
 # verify_binary FILE: FILE is an ELF binary for the profile's arch; static for
 # musl targets; for glibc targets with a version suffix (….2.39) it needs no
-# newer GLIBC_ symbol version.
+# newer GLIBC_ symbol version; for Android, static or Android's linker64.
 verify_binary() {
-    local file=$1 arch need max
+    local file=$1 arch need max interp
     arch="$(elf_arch "$file" 2>/dev/null)" || { log "${file##*/}: not an ELF binary"; return 1; }
     [[ $arch == "$PROFILE_ARCH" ]] || { log "${file##*/}: built for $arch, not $PROFILE_ARCH"; return 1; }
+    if [[ $RUST_TARGET == *android* ]]; then
+        interp="$(readelf -lW "$file" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')"
+        if [[ -n $interp && $interp != /system/bin/linker64 ]]; then
+            log "${file##*/}: interpreter $interp is not Android's /system/bin/linker64"
+            return 1
+        fi
+        return 0
+    fi
     if [[ $RUST_TARGET == *musl* ]] && readelf -lW "$file" 2>/dev/null | grep -q INTERP; then
         log "${file##*/}: not static (has an ELF interpreter)"
         return 1
@@ -368,7 +429,8 @@ BUILD_SETTINGS="cargo: lto=fat codegen-units=1 strip=symbols; go: -trimpath -ldf
 # never reuses an old build.
 recipe_hash() {
     {
-        printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}" "$BUILD_SETTINGS"
+        printf '%s\n' "$1" "${REPOS[$1]}" "${FILES[$1]}" "${SPECS[$1]}" "${SOURCES[$1]}" "$BUILD_SETTINGS" \
+            "cargo driver: $CARGO_DRIVER"
         cat "$PROFILES_DIR/$PROFILE_NAME.env"
         # A cross recipe's version lives in its script (and the SDK helpers).
         if [[ ${SOURCES[$1]} == cross:* ]]; then
@@ -429,8 +491,9 @@ obtain_tool() {
         return 0
     fi
     # The latest upstream release; checked for the arch only, like the
-    # eget-only bundles.
-    if fetch_release "$name" "${REPOS[$name]}" "${FILES[$name]}" "${SPECS[$name]}" "$PROFILE_ARCH" "$dest"; then
+    # eget-only bundles. Not for NATIVE_ONLY profiles (may be glibc).
+    if [[ $NATIVE_ONLY != 1 ]] &&
+        fetch_release "$name" "${REPOS[$name]}" "${FILES[$name]}" "${SPECS[$name]}" "$PROFILE_ARCH" "$dest"; then
         HOW=fallback-release
         GOT_VERSION=release
         return 0
