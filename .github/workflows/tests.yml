@@ -18,8 +18,8 @@ jobs:
           sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
           (cd /tmp && curl -fsSL https://zyedidia.github.io/eget.sh | sh && mv /tmp/eget ~/.local/bin/)
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: JordanBradshaw/chezmoi
           ref: main
